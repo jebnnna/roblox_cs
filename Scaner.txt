@@ -378,32 +378,33 @@ ContBtn.MouseButton1Click:Connect(function()
         contRunning=false; ContLbl.Text="Continuous Teleport: OFF"; ContLbl.TextColor3=Color3.fromRGB(100,180,255)
         StatusLbl.Text="  stopped"; return
     end
-    local query=SearchBox.Text
-    if query=="" then StatusLbl.Text="  type a name first"; return end
+    if #lastResults==0 then StatusLbl.Text="  search first to build the list"; return end
     contRunning=true; ContLbl.Text="Continuous Teleport: ON  ◼"; ContLbl.TextColor3=Color3.fromRGB(255,100,100)
     task.spawn(function()
         while contRunning do
-            RunSearch(query)
+            -- Build pool from current list — favs only, or all if none starred
             local pool={}
             for _,e in ipairs(lastResults) do if favorites[e.instance] then pool[#pool+1]=e end end
             if #pool==0 then pool=lastResults end
-            if #pool==0 then StatusLbl.Text="  no results, retrying..."; task.wait(S.TpDelay)
-            else
-                for i,entry in ipairs(pool) do
-                    if not contRunning then break end
-                    local root=GetHRP(); if not root then contRunning=false; break end
-                    if entry.instance and entry.instance.Parent then
-                        local pos
-                        if entry.instance:IsA("BasePart") then pos=entry.instance.Position
-                        elseif entry.instance:IsA("Model") then
-                            local p=entry.instance.PrimaryPart or entry.instance:FindFirstChildWhichIsA("BasePart")
-                            if p then pos=p.Position end
-                        end
-                        if pos then root.CFrame=CFrame.new(pos)*CFrame.new(0,4,0); StatusLbl.Text="  ["..i.."/"..#pool.."] "..entry.name end
+            for i,entry in ipairs(pool) do
+                if not contRunning then break end
+                local root=GetHRP(); if not root then contRunning=false; break end
+                local inst=entry.instance
+                if inst and inst.Parent then
+                    local pos
+                    if inst:IsA("BasePart") then pos=inst.Position
+                    elseif inst:IsA("Model") then
+                        local p=inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+                        if p then pos=p.Position end
                     end
-                    task.wait(S.TpDelay)
+                    if pos then
+                        root.CFrame=CFrame.new(pos)*CFrame.new(0,4,0)
+                        StatusLbl.Text="  ["..i.."/"..#pool.."] "..entry.name
+                    end
                 end
+                task.wait(S.TpDelay)
             end
+            -- Loop restarts from top of pool — no re-search, same list
         end
         ContLbl.Text="Continuous Teleport: OFF"; ContLbl.TextColor3=Color3.fromRGB(100,180,255)
     end)
