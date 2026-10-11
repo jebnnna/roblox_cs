@@ -20,7 +20,7 @@ ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent         = game:GetService("CoreGui")
 
 -- STATE
-local S = { RadarActive=false, RadarRadius=15, LastSearch="", TpDelay=1.5, FilterMode="All" }
+local S = { RadarActive=false, RadarRadius=15, LastSearch="", TpDelay=1.5, FilterMode="All", TpMode="Coords" }
 local lastResults = {}
 local favorites   = {}
 local hlFolder, radarFolder, radarConn = nil, nil, nil
@@ -151,6 +151,47 @@ end
 local function ClearHL() if hlFolder then hlFolder:Destroy(); hlFolder = nil end end
 local function ClearRadarHL() if radarFolder then radarFolder:Destroy(); radarFolder = nil end end
 
+-- Get position from instance (used at search time for snapshot)
+local function GetInstPos(inst)
+    if inst:IsA("BasePart") then return inst.Position
+    elseif inst:IsA("Model") then
+        local p = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+        if p then return p.Position end
+    end
+    return nil
+end
+
+-- Unified teleport: streams area first, then moves player
+local function TeleportTo(entry)
+    local root = GetHRP(); if not root then return end
+    local targetPos
+
+    if S.TpMode == "Coords" then
+        -- Use snapshot stored at search time
+        targetPos = entry.pos
+    else
+        -- Live: read from instance right now
+        if entry.instance and entry.instance.Parent then
+            targetPos = GetInstPos(entry.instance)
+        end
+        -- Fallback to snapshot if live not available (part unloaded)
+        if not targetPos then targetPos = entry.pos end
+    end
+
+    if not targetPos then
+        StatusLbl.Text = "  no position for: " .. entry.name
+        return
+    end
+
+    -- Request Roblox to stream content around destination before teleporting
+    -- This prevents the "Gameplay Paused" screen on StreamingEnabled games
+    pcall(function()
+        LocalPlayer:RequestStreamAroundAsync(targetPos, 5)
+    end)
+
+    root.CFrame = CFrame.new(targetPos) * CFrame.new(0, 4, 0)
+end
+
 -- ── LAYOUT ORDER: Search box → filter → search btn → status → results list → radar → delay → cont tp → add radar → clear → count → back ──
 
 -- 1. Search input
@@ -174,6 +215,14 @@ end)
 
 -- 3. Search button
 local SearchBtn, _ = MkBtn("Search Workspace", Color3.fromRGB(30,20,50), Color3.fromRGB(80,60,110))
+
+-- 3b. TpMode toggle
+local TpModeBtn, TpModeLbl = MkBtn("Mode: Coords (safe)", Color3.fromRGB(18,18,18), Color3.fromRGB(55,55,55), Color3.fromRGB(100,220,100))
+TpModeBtn.MouseButton1Click:Connect(function()
+    S.TpMode = S.TpMode == "Coords" and "Live" or "Coords"
+    TpModeLbl.Text = S.TpMode == "Coords" and "Mode: Coords (safe)" or "Mode: Live (accurate)"
+    TpModeLbl.TextColor3 = S.TpMode == "Coords" and Color3.fromRGB(100,220,100) or Color3.fromRGB(255,200,80)
+end)
 
 -- 4. Status label
 local StatusLbl = MkStatus()
@@ -238,15 +287,8 @@ local function BuildResultRows()
         Instance.new("UICorner", delBtn).CornerRadius = UDim.new(0,6)
 
         row.MouseButton1Click:Connect(function()
-            local root = GetHRP(); if not root then return end
-            local inst = entry.instance
-            local pos
-            if inst:IsA("BasePart") then pos = inst.Position
-            elseif inst:IsA("Model") then
-                local p = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
-                if p then pos = p.Position end
-            end
-            if pos then root.CFrame = CFrame.new(pos)*CFrame.new(0,4,0); StatusLbl.Text="  → "..entry.name end
+            TeleportTo(entry)
+            StatusLbl.Text = "  → " .. entry.name
         end)
 
         favBtn.MouseButton1Click:Connect(function()
@@ -291,7 +333,8 @@ local function RunSearch(query)
             tl.TextStrokeTransparency=0; tl.TextStrokeColor3=Color3.fromRGB(0,0,0)
             tl.Font=Enum.Font.GothamBold; tl.TextSize=12
         end
-        lastResults[#lastResults+1]={instance=inst,name=inst.Name,class=inst.ClassName,dist=DistanceTo(inst)}
+        local snapPos = GetInstPos(inst)
+        lastResults[#lastResults+1]={instance=inst,name=inst.Name,class=inst.ClassName,dist=DistanceTo(inst),pos=snapPos}
     end
     table.sort(lastResults,function(a,b) return a.dist<b.dist end)
     StatusLbl.Text="  "..#lastResults.." ("..S.FilterMode..") for: "..query
@@ -390,18 +433,8 @@ ContBtn.MouseButton1Click:Connect(function()
                 if not contRunning then break end
                 local root=GetHRP(); if not root then contRunning=false; break end
                 local inst=entry.instance
-                if inst and inst.Parent then
-                    local pos
-                    if inst:IsA("BasePart") then pos=inst.Position
-                    elseif inst:IsA("Model") then
-                        local p=inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
-                        if p then pos=p.Position end
-                    end
-                    if pos then
-                        root.CFrame=CFrame.new(pos)*CFrame.new(0,4,0)
-                        StatusLbl.Text="  ["..i.."/"..#pool.."] "..entry.name
-                    end
-                end
+                TeleportTo(entry)
+                StatusLbl.Text="  ["..i.."/"..#pool.."] "..entry.name
                 task.wait(S.TpDelay)
             end
             -- Loop restarts from top of pool — no re-search, same list
@@ -426,7 +459,7 @@ AddRadarBtn.MouseButton1Click:Connect(function()
         end
         if not pos or (myPos-pos).Magnitude>S.RadarRadius or existing[inst] then continue end
         existing[inst]=true
-        lastResults[#lastResults+1]={instance=inst,name=inst.Name,class=inst.ClassName,dist=math.floor((myPos-pos).Magnitude)}
+        lastResults[#lastResults+1]={instance=inst,name=inst.Name,class=inst.ClassName,dist=math.floor((myPos-pos).Magnitude),pos=pos}
         added=added+1
     end
     table.sort(lastResults,function(a,b) return a.dist<b.dist end)
