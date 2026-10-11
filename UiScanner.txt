@@ -114,47 +114,76 @@ end
 local StatusLbl = SLbl()
 
 -- ─── CLICK ENGINE ────────────────────────────────────────────
--- Three-method chain — works on visible, hidden, and off-screen elements.
--- Method 1: fire signals directly (works on any GuiButton, visible or not)
--- Method 2: VIM tap at screen center (works on visible on-screen buttons)
--- Method 3: make element visible temporarily, VIM tap, restore
+-- Four-method chain: TextButton, ImageButton, any GuiObject,
+-- hidden menus (ancestors invisible), off-screen elements.
+-- Method 1: firesignal (executor API) — visibility/position irrelevant
+-- Method 2: firebutton (alternate executor API)
+-- Method 3: VIM tap with full ancestor chain revealed
 local VIM = game:GetService("VirtualInputManager")
 
 local function FireElement(inst)
     if not inst or not inst.Parent then return false end
 
-    -- Method 1: direct signal fire — most reliable, works hidden/off-screen
     if inst:IsA("GuiButton") then
+        -- Method 1: firesignal — Delta executor API, works on TextButton AND
+        -- ImageButton, hidden or visible, on-screen or off. Fires Down/Up/Click
+        -- AND Activated because some games wire only Activated internally.
+        local ok = false
         pcall(function()
-            inst.MouseButton1Down:Fire(0, 0)
-            inst.MouseButton1Up:Fire(0, 0)
-            inst.MouseButton1Click:Fire()
+            firesignal(inst.MouseButton1Down, 0, 0)
+            firesignal(inst.MouseButton1Up,   0, 0)
+            firesignal(inst.MouseButton1Click)
+            firesignal(inst.Activated)
+            ok = true
         end)
-        return true
+        if ok then return true end
+
+        -- Method 2: firebutton — alternate executor API, same effect
+        pcall(function()
+            if type(firebutton) == "function" then
+                firebutton(inst)
+                ok = true
+            end
+        end)
+        if ok then return true end
     end
 
-    -- Method 2: VIM tap for non-button GuiObjects that are visible
-    local tapped = false
-    if inst:IsA("GuiObject") and inst.Visible then
+    -- Method 3: VIM tap with full ancestry chain revealed.
+    -- Problem with the old code: it only showed the element itself, so if any
+    -- parent Frame was hidden the AbsoluteSize was still (0,0) and the tap
+    -- fired at wrong coordinates. This version walks all ancestors, reveals
+    -- every hidden GuiObject up the chain, waits one frame so Roblox
+    -- recalculates AbsolutePosition/Size, taps, then restores everything.
+    if inst:IsA("GuiObject") then
         pcall(function()
-            local pos = inst.AbsolutePosition + inst.AbsoluteSize * 0.5
-            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
-            task.wait(0.05)
-            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-            tapped = true
-        end)
-    end
-
-    -- Method 3: hidden GuiObject — make visible, tap, restore
-    if not tapped and inst:IsA("GuiObject") then
-        pcall(function()
+            local hidden = {}
+            local p = inst.Parent
+            while p and p ~= game do
+                if p:IsA("GuiObject") and not p.Visible then
+                    hidden[#hidden+1] = p
+                    p.Visible = true
+                end
+                p = p.Parent
+            end
             local wasVisible = inst.Visible
             inst.Visible = true
-            local pos = inst.AbsolutePosition + inst.AbsoluteSize * 0.5
-            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
-            task.wait(0.05)
-            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+
+            task.wait()  -- one frame: AbsolutePosition/Size recalculates
+
+            local ap = inst.AbsolutePosition
+            local as = inst.AbsoluteSize
+            if as.X > 0 and as.Y > 0 then
+                local cx = ap.X + as.X * 0.5
+                local cy = ap.Y + as.Y * 0.5
+                VIM:SendMouseButtonEvent(cx, cy, 0, true,  game, 0)
+                task.wait(0.05)
+                VIM:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
+            end
+
             inst.Visible = wasVisible
+            for _, obj in ipairs(hidden) do
+                pcall(function() obj.Visible = false end)
+            end
         end)
     end
 
