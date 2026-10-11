@@ -139,12 +139,7 @@ end
 
 local function DistanceTo(inst)
     local root = GetHRP(); if not root then return 0 end
-    local pos
-    if inst:IsA("BasePart") then pos = inst.Position
-    elseif inst:IsA("Model") then
-        local p = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
-        if p then pos = p.Position end
-    end
+    local pos = GetInstPos(inst)
     return pos and math.floor((root.Position - pos).Magnitude) or 0
 end
 
@@ -152,44 +147,50 @@ local function ClearHL() if hlFolder then hlFolder:Destroy(); hlFolder = nil end
 local function ClearRadarHL() if radarFolder then radarFolder:Destroy(); radarFolder = nil end end
 
 -- Get position from instance (used at search time for snapshot)
+-- Searches recursively so nested models (buildings, NPCs, pickups) resolve correctly.
 local function GetInstPos(inst)
     if inst:IsA("BasePart") then return inst.Position
     elseif inst:IsA("Model") then
-        local p = inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+        -- PrimaryPart → any direct BasePart → any BasePart anywhere in hierarchy
+        local p = inst.PrimaryPart
+            or inst:FindFirstChildWhichIsA("BasePart")
+            or inst:FindFirstChildWhichIsA("BasePart", true)
         if p then return p.Position end
+        -- Last resort: bounding-box centre (works even on fully-nested models)
+        local ok, cf = pcall(function() return inst:GetBoundingBox() end)
+        if ok and cf then return cf.Position end
     end
     return nil
 end
 
--- Unified teleport: streams area first, then moves player
+-- Unified teleport: pre-warms streaming in background, moves player immediately.
+-- Returns true on success, false on failure (so callers can gate their status text).
 local function TeleportTo(entry)
-    local root = GetHRP(); if not root then return end
+    local root = GetHRP(); if not root then return false end
     local targetPos
 
     if S.TpMode == "Coords" then
-        -- Use snapshot stored at search time
         targetPos = entry.pos
     else
-        -- Live: read from instance right now
         if entry.instance and entry.instance.Parent then
             targetPos = GetInstPos(entry.instance)
         end
-        -- Fallback to snapshot if live not available (part unloaded)
         if not targetPos then targetPos = entry.pos end
     end
 
     if not targetPos then
         StatusLbl.Text = "  no position for: " .. entry.name
-        return
+        return false
     end
 
-    -- Request Roblox to stream content around destination before teleporting
-    -- This prevents the "Gameplay Paused" screen on StreamingEnabled games
-    pcall(function()
-        LocalPlayer:RequestStreamAroundAsync(targetPos, 5)
+    -- Fire stream pre-warm in background so teleport is instant.
+    -- Old code awaited this for up to 5s, causing the "click → long pause → move" bug.
+    task.spawn(function()
+        pcall(function() LocalPlayer:RequestStreamAroundAsync(targetPos, 2) end)
     end)
 
     root.CFrame = CFrame.new(targetPos) * CFrame.new(0, 4, 0)
+    return true
 end
 
 -- ── LAYOUT ORDER: Search box → filter → search btn → status → results list → radar → delay → cont tp → add radar → clear → count → back ──
@@ -287,8 +288,8 @@ local function BuildResultRows()
         Instance.new("UICorner", delBtn).CornerRadius = UDim.new(0,6)
 
         row.MouseButton1Click:Connect(function()
-            TeleportTo(entry)
-            StatusLbl.Text = "  → " .. entry.name
+            local ok = TeleportTo(entry)
+            if ok then StatusLbl.Text = "  → " .. entry.name end
         end)
 
         favBtn.MouseButton1Click:Connect(function()
@@ -324,7 +325,7 @@ local function RunSearch(query)
         hl.FillColor=Color3.fromRGB(200,100,255); hl.OutlineColor=Color3.fromRGB(255,255,255)
         hl.FillTransparency=0.5; hl.OutlineTransparency=0
         hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Adornee=inst; hl.Parent=hlFolder
-        local lb2 = inst:IsA("BasePart") and inst or (inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart"))
+        local lb2 = inst:IsA("BasePart") and inst or (inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true))
         if lb2 then
             local bb=Instance.new("BillboardGui"); bb.Size=UDim2.new(0,120,0,24)
             bb.StudsOffset=Vector3.new(0,4,0); bb.AlwaysOnTop=true; bb.Adornee=lb2; bb.Parent=hlFolder
@@ -361,18 +362,14 @@ local function RunRadarScan()
     for _,inst in ipairs(workspace:GetDescendants()) do
         if seen[inst] then continue end
         if Character and inst:IsDescendantOf(Character) then continue end
-        local pos
-        if inst:IsA("BasePart") then pos=inst.Position
-        elseif inst:IsA("Model") then
-            local p=inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart"); if p then pos=p.Position end
-        end
+        local pos = GetInstPos(inst)
         if not pos or (myPos-pos).Magnitude>S.RadarRadius then continue end
         seen[inst]=true
         local hl=Instance.new("Highlight")
         hl.FillColor=Color3.fromRGB(80,200,255); hl.OutlineColor=Color3.fromRGB(255,255,255)
         hl.FillTransparency=0.55; hl.OutlineTransparency=0
         hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Adornee=inst; hl.Parent=radarFolder
-        local lb2=inst:IsA("BasePart") and inst or (inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart"))
+        local lb2=inst:IsA("BasePart") and inst or (inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart", true))
         if lb2 then
             local bb=Instance.new("BillboardGui"); bb.Size=UDim2.new(0,140,0,24)
             bb.StudsOffset=Vector3.new(0,4,0); bb.AlwaysOnTop=true; bb.Adornee=lb2; bb.Parent=radarFolder
@@ -425,19 +422,25 @@ ContBtn.MouseButton1Click:Connect(function()
     contRunning=true; ContLbl.Text="Continuous Teleport: ON  ◼"; ContLbl.TextColor3=Color3.fromRGB(255,100,100)
     task.spawn(function()
         while contRunning do
-            -- Build pool from current list — favs only, or all if none starred
+            -- Build pool: favs only, or all if none starred
             local pool={}
             for _,e in ipairs(lastResults) do if favorites[e.instance] then pool[#pool+1]=e end end
             if #pool==0 then pool=lastResults end
+            -- Guard: list was cleared mid-run — wait and retry instead of CPU-spinning
+            if #pool==0 then task.wait(S.TpDelay); continue end
             for i,entry in ipairs(pool) do
                 if not contRunning then break end
-                local root=GetHRP(); if not root then contRunning=false; break end
-                local inst=entry.instance
+                -- On death HRP is nil for ~0.6s. Wait for respawn instead of killing the loop.
+                local root = GetHRP()
+                if not root then
+                    task.wait(2); root = GetHRP()
+                    if not root then task.wait(2) end
+                    if not contRunning then break end
+                end
                 TeleportTo(entry)
                 StatusLbl.Text="  ["..i.."/"..#pool.."] "..entry.name
                 task.wait(S.TpDelay)
             end
-            -- Loop restarts from top of pool — no re-search, same list
         end
         ContLbl.Text="Continuous Teleport: OFF"; ContLbl.TextColor3=Color3.fromRGB(100,180,255)
     end)
@@ -452,11 +455,7 @@ AddRadarBtn.MouseButton1Click:Connect(function()
     for _,inst in ipairs(workspace:GetDescendants()) do
         if Character and inst:IsDescendantOf(Character) then continue end
         if not (inst:IsA("BasePart") or inst:IsA("Model")) then continue end
-        local pos
-        if inst:IsA("BasePart") then pos=inst.Position
-        elseif inst:IsA("Model") then
-            local p=inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart"); if p then pos=p.Position end
-        end
+        local pos = GetInstPos(inst)
         if not pos or (myPos-pos).Magnitude>S.RadarRadius or existing[inst] then continue end
         existing[inst]=true
         lastResults[#lastResults+1]={instance=inst,name=inst.Name,class=inst.ClassName,dist=math.floor((myPos-pos).Magnitude),pos=pos}
