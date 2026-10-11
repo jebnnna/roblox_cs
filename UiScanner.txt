@@ -22,9 +22,10 @@ ScreenGui.Parent = game:GetService("CoreGui")
 
 -- ─── STATE ───────────────────────────────────────────────────
 local S = {
-    ClickDelay  = 1.5,
-    FilterMode  = "All",
-    ScanCoreGui = false,
+    ClickDelay     = 1.5,
+    FilterMode     = "All",
+    ScanCoreGui    = false,
+    IncludeHidden  = false,  -- scan invisible elements (bypasses hidden menus)
 }
 local lastResults   = {}   -- {instance, name, class, text}
 local favorites     = {}   -- set keyed by instance
@@ -113,31 +114,50 @@ end
 local StatusLbl = SLbl()
 
 -- ─── CLICK ENGINE ────────────────────────────────────────────
--- Uses VirtualInputManager to simulate a real tap at the element's
--- screen center — works on Delta mobile regardless of button type.
+-- Three-method chain — works on visible, hidden, and off-screen elements.
+-- Method 1: fire signals directly (works on any GuiButton, visible or not)
+-- Method 2: VIM tap at screen center (works on visible on-screen buttons)
+-- Method 3: make element visible temporarily, VIM tap, restore
 local VIM = game:GetService("VirtualInputManager")
 
 local function FireElement(inst)
     if not inst or not inst.Parent then return false end
-    -- Get absolute center of the element on screen
-    local ok, err = pcall(function()
-        local pos = inst.AbsolutePosition + inst.AbsoluteSize * 0.5
-        -- Finger down
-        VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
-        task.wait(0.05)
-        -- Finger up
-        VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
-    end)
-    -- Fallback: fire signals directly if VIM failed
-    if not ok then
+
+    -- Method 1: direct signal fire — most reliable, works hidden/off-screen
+    if inst:IsA("GuiButton") then
         pcall(function()
-            if inst:IsA("GuiButton") then
-                inst.MouseButton1Down:Fire(0, 0)
-                inst.MouseButton1Up:Fire(0, 0)
-                inst.MouseButton1Click:Fire()
-            end
+            inst.MouseButton1Down:Fire(0, 0)
+            inst.MouseButton1Up:Fire(0, 0)
+            inst.MouseButton1Click:Fire()
+        end)
+        return true
+    end
+
+    -- Method 2: VIM tap for non-button GuiObjects that are visible
+    local tapped = false
+    if inst:IsA("GuiObject") and inst.Visible then
+        pcall(function()
+            local pos = inst.AbsolutePosition + inst.AbsoluteSize * 0.5
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+            tapped = true
         end)
     end
+
+    -- Method 3: hidden GuiObject — make visible, tap, restore
+    if not tapped and inst:IsA("GuiObject") then
+        pcall(function()
+            local wasVisible = inst.Visible
+            inst.Visible = true
+            local pos = inst.AbsolutePosition + inst.AbsoluteSize * 0.5
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, true,  game, 0)
+            task.wait(0.05)
+            VIM:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 0)
+            inst.Visible = wasVisible
+        end)
+    end
+
     return true
 end
 
@@ -295,6 +315,14 @@ CoreGuiBtn.MouseButton1Click:Connect(function()
     CoreGuiLbl.TextColor3 = S.ScanCoreGui and Color3.fromRGB(255,200,80) or Color3.fromRGB(150,150,150)
 end)
 
+-- Include hidden elements toggle — finds buttons inside closed menus
+local HiddenBtn, HiddenLbl = Btn("Include Hidden: OFF", Color3.fromRGB(18,18,18), Color3.fromRGB(55,55,55), Color3.fromRGB(150,150,150))
+HiddenBtn.MouseButton1Click:Connect(function()
+    S.IncludeHidden = not S.IncludeHidden
+    HiddenLbl.Text = "Include Hidden: "..(S.IncludeHidden and "ON" or "OFF")
+    HiddenLbl.TextColor3 = S.IncludeHidden and Color3.fromRGB(255,200,80) or Color3.fromRGB(150,150,150)
+end)
+
 local function RunSearch(query)
     ClearHL(); lastResults = {}
     if query=="" then StatusLbl.Text="  type a name first"; BuildResultRows(); return end
@@ -306,6 +334,19 @@ local function RunSearch(query)
             if inst:IsDescendantOf(ScreenGui) then continue end
             if not inst.Name:lower():find(ql,1,true) then continue end
             if not PassesFilter(inst) then continue end
+            -- Skip invisible unless IncludeHidden is ON
+            if not S.IncludeHidden then
+                -- Walk up ancestry — if any ancestor is invisible, skip
+                local visible = true
+                local p = inst
+                while p and p ~= root do
+                    if p:IsA("GuiObject") and not p.Visible then
+                        visible = false; break
+                    end
+                    p = p.Parent
+                end
+                if not visible then continue end
+            end
             local txt=""
             if inst:IsA("TextLabel") or inst:IsA("TextButton") then txt=inst.Text:sub(1,28) end
             lastResults[#lastResults+1]={instance=inst,name=inst.Name,class=inst.ClassName,text=txt}
