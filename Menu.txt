@@ -1,0 +1,144 @@
+-- Dacker | roblox_cs | Roblox Mobile
+
+local CoreGui          = game:GetService("CoreGui")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+if CoreGui:FindFirstChild("DackerGUI") then
+    CoreGui.DackerGUI:Destroy()
+end
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name           = "DackerGUI"
+ScreenGui.ResetOnSpawn   = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Parent         = CoreGui
+
+-- FRAME
+local MainFrame = Instance.new("Frame")
+MainFrame.Name             = "MainFrame"
+MainFrame.Size             = UDim2.new(0, 280, 0, 420)
+MainFrame.Position         = UDim2.new(0, 10, 0, 10)
+MainFrame.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+MainFrame.BorderSizePixel  = 0
+MainFrame.ClipsDescendants = true
+MainFrame.Parent           = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 12)
+local msk = Instance.new("UIStroke", MainFrame)
+msk.Color = Color3.fromRGB(70, 70, 70); msk.Thickness = 1.5
+
+-- TITLE BAR
+local TitleBar = Instance.new("Frame", MainFrame)
+TitleBar.Size             = UDim2.new(1, 0, 0, 44)
+TitleBar.BackgroundColor3 = Color3.fromRGB(18, 18, 18)
+TitleBar.BorderSizePixel  = 0; TitleBar.ZIndex = 5
+Instance.new("UICorner", TitleBar).CornerRadius = UDim.new(0, 12)
+local tfix = Instance.new("Frame", TitleBar)
+tfix.Size = UDim2.new(1,0,0,12); tfix.Position = UDim2.new(0,0,1,-12)
+tfix.BackgroundColor3 = Color3.fromRGB(18,18,18); tfix.BorderSizePixel = 0; tfix.ZIndex = 5
+
+local TitleLbl = Instance.new("TextLabel", TitleBar)
+TitleLbl.Text = "DACKER"; TitleLbl.Size = UDim2.new(1,-50,1,0)
+TitleLbl.Position = UDim2.new(0,14,0,0); TitleLbl.BackgroundTransparency = 1
+TitleLbl.TextColor3 = Color3.fromRGB(240,240,240); TitleLbl.TextSize = 16
+TitleLbl.Font = Enum.Font.GothamBold; TitleLbl.TextXAlignment = Enum.TextXAlignment.Left
+TitleLbl.ZIndex = 6
+
+local MinBtn = Instance.new("TextButton", TitleBar)
+MinBtn.Text = "—"; MinBtn.Size = UDim2.new(0,34,0,34); MinBtn.Position = UDim2.new(1,-38,0,5)
+MinBtn.BackgroundColor3 = Color3.fromRGB(55,55,55); MinBtn.TextColor3 = Color3.fromRGB(255,255,255)
+MinBtn.TextSize = 13; MinBtn.Font = Enum.Font.GothamBold; MinBtn.BorderSizePixel = 0; MinBtn.ZIndex = 6
+Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0,8)
+
+-- CONTENT — buttons stacked, exit pinned at bottom via absolute position
+local ContentFrame = Instance.new("Frame", MainFrame)
+ContentFrame.Name             = "ContentFrame"
+ContentFrame.Size             = UDim2.new(1, 0, 1, -44)
+ContentFrame.Position         = UDim2.new(0, 0, 0, 44)
+ContentFrame.BackgroundTransparency = 1
+
+-- Menu buttons use a list layout in their own sub-frame
+local BtnFrame = Instance.new("Frame", ContentFrame)
+BtnFrame.Size             = UDim2.new(1, 0, 1, -58)  -- leave 58px at bottom for exit
+BtnFrame.Position         = UDim2.new(0, 0, 0, 0)
+BtnFrame.BackgroundTransparency = 1
+
+local BtnLayout = Instance.new("UIListLayout", BtnFrame)
+BtnLayout.Padding             = UDim.new(0, 8)
+BtnLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+BtnLayout.VerticalAlignment   = Enum.VerticalAlignment.Center
+
+local BtnPad = Instance.new("UIPadding", BtnFrame)
+BtnPad.PaddingTop    = UDim.new(0, 10)
+BtnPad.PaddingBottom = UDim.new(0, 6)
+
+local function CreateMenuButton(text, url)
+    local Btn = Instance.new("TextButton", BtnFrame)
+    Btn.Size             = UDim2.new(0, 250, 0, 46)
+    Btn.BackgroundColor3 = Color3.fromRGB(25, 20, 40)
+    Btn.BorderSizePixel  = 0; Btn.AutoButtonColor = false; Btn.Text = ""
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 10)
+    local sk = Instance.new("UIStroke", Btn)
+    sk.Color = Color3.fromRGB(50, 35, 80); sk.Thickness = 1
+    local lbl = Instance.new("TextLabel", Btn)
+    lbl.Text = text; lbl.Size = UDim2.new(1,0,1,0)
+    lbl.BackgroundTransparency = 1; lbl.TextColor3 = Color3.fromRGB(230,230,230)
+    lbl.TextSize = 13; lbl.Font = Enum.Font.GothamBold
+    Btn.MouseButton1Click:Connect(function()
+        ScreenGui:Destroy()
+        loadstring(game:HttpGet(url))()
+    end)
+    return Btn
+end
+
+CreateMenuButton("BASIC HACK",  "https://raw.githubusercontent.com/jebnnna/roblox_cs/main/basic_hack.txt")
+CreateMenuButton("FPS HELPER",  "https://raw.githubusercontent.com/jebnnna/roblox_cs/main/FpsShooter.txt")
+CreateMenuButton("SCANNER",     "https://raw.githubusercontent.com/jebnnna/roblox_cs/main/Scaner.txt")
+CreateMenuButton("EXECUTOR",    "https://raw.githubusercontent.com/jebnnna/roblox_cs/main/Executor.txt")
+CreateMenuButton("UI SCANNER",  "https://raw.githubusercontent.com/jebnnna/roblox_cs/main/UiScanner.txt")
+
+-- EXIT — pinned to absolute bottom of ContentFrame
+local ExitBtn = Instance.new("TextButton", ContentFrame)
+ExitBtn.Size             = UDim2.new(0, 250, 0, 40)
+ExitBtn.Position         = UDim2.new(0.5, -125, 1, -50)
+ExitBtn.BackgroundColor3 = Color3.fromRGB(35, 12, 12)
+ExitBtn.BorderSizePixel  = 0; ExitBtn.AutoButtonColor = false; ExitBtn.Text = ""
+Instance.new("UICorner", ExitBtn).CornerRadius = UDim.new(0, 10)
+local ExitSk = Instance.new("UIStroke", ExitBtn)
+ExitSk.Color = Color3.fromRGB(100, 30, 30); ExitSk.Thickness = 1
+local ExitLbl = Instance.new("TextLabel", ExitBtn)
+ExitLbl.Text = "Exit"; ExitLbl.Size = UDim2.new(1,0,1,0)
+ExitLbl.BackgroundTransparency = 1; ExitLbl.TextColor3 = Color3.fromRGB(220,80,80)
+ExitLbl.TextSize = 13; ExitLbl.Font = Enum.Font.GothamBold
+ExitBtn.MouseButton1Click:Connect(function() ScreenGui:Destroy() end)
+
+-- DRAG
+local drag, dStart, dPos = false, nil, nil
+MainFrame.InputBegan:Connect(function(i)
+    if (i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1)
+    and i.Position.Y - MainFrame.AbsolutePosition.Y < 44 then
+        drag=true; dStart=i.Position; dPos=MainFrame.Position
+        i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then drag=false end end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if drag and (i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseMovement) then
+        local d = i.Position - dStart
+        MainFrame.Position = UDim2.new(dPos.X.Scale, dPos.X.Offset+d.X, dPos.Y.Scale, dPos.Y.Offset+d.Y)
+    end
+end)
+UserInputService.InputEnded:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.Touch or i.UserInputType==Enum.UserInputType.MouseButton1 then
+        drag=false
+    end
+end)
+
+-- MINIMIZE
+local mini = false
+MinBtn.MouseButton1Click:Connect(function()
+    mini = not mini
+    TweenService:Create(MainFrame, TweenInfo.new(0.2, Enum.EasingStyle.Quad),
+        {Size = mini and UDim2.new(0,280,0,44) or UDim2.new(0,280,0,420)}):Play()
+    MinBtn.Text = mini and "+" or "—"
+    ContentFrame.Visible = not mini
+end)
