@@ -1,11 +1,12 @@
 -- FPS Shooter Helper | Delta Executor | Roblox Mobile
 -- Language: Lua 5.1 (Roblox Luau)
--- Features: Aimbot + ESP + Highlight Glow
+-- Features: Aimbot + ESP + Highlight Glow + Absolute Aim (full auto engine)
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local TweenService     = game:GetService("TweenService")
+local VirtualUser      = game:GetService("VirtualUser")
 
 local LocalPlayer      = Players.LocalPlayer
 local Character        = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
@@ -13,16 +14,36 @@ local Humanoid         = Character:WaitForChild("Humanoid")
 local HumanoidRootPart = Character:WaitForChild("HumanoidRootPart")
 local Camera           = workspace.CurrentCamera
 
+-- ─── STATE ───────────────────────────────────────────────────────────────────
 local State = {
-    Aimbot       = false,
-    AimHead      = false,
-    TeamCheck    = false,
-    ESP          = false,
-    ESPGlow      = false,
-    AimbotFOV    = 150,
-    AimbotSmooth = 0.08,
+    -- original toggles
+    Aimbot          = false,
+    AimHead         = false,
+    TeamCheck       = false,
+    ESP             = false,
+    ESPGlow         = false,
+    AimbotFOV       = 800,   -- widened default so AbsoluteAim sees everything
+    AimbotSmooth    = 0.08,
+
+    -- Absolute Aim engine
+    AbsoluteAim     = false,
+
+    -- Absolute Aim sub-settings (only active when AbsoluteAim = true)
+    AA_AutoAttack   = false,  -- fires tool / clicks automatically
+    AA_CycleTargets = true,   -- rotate through all alive targets, not just nearest
+    AA_ShowESP      = true,   -- force-build ESP+Glow when engine is on
+    AA_AttackDelay  = 0.35,   -- seconds between each auto-attack pulse
+    AA_LockSmooth   = 0.25,   -- lerp strength while AA is running (snappier than aimbot)
 }
 
+-- internal AA runtime vars
+local aaTargetList   = {}   -- ordered list of {player, bone} pairs, rebuilt each cycle
+local aaTargetIndex  = 1    -- current position in the list
+local aaLastAttack   = 0    -- tick() of last attack fire
+local aaConn         = nil  -- RenderStepped connection handle
+local aaAttackConn   = nil  -- Heartbeat connection handle for attack pulse
+
+-- ─── GUI CLEANUP ─────────────────────────────────────────────────────────────
 if game:GetService("CoreGui"):FindFirstChild("FPS_HelperGUI") then
     game:GetService("CoreGui").FPS_HelperGUI:Destroy()
 end
@@ -33,10 +54,11 @@ ScreenGui.ResetOnSpawn   = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent         = game:GetService("CoreGui")
 
+-- ─── MAIN FRAME ──────────────────────────────────────────────────────────────
 local MainFrame = Instance.new("Frame")
 MainFrame.Name              = "MainFrame"
-MainFrame.Size              = UDim2.new(0, 280, 0, 420)
-MainFrame.Position          = UDim2.new(0.5, -140, 0.5, -210)
+MainFrame.Size              = UDim2.new(0, 280, 0, 520)
+MainFrame.Position          = UDim2.new(0.5, -140, 0.5, -260)
 MainFrame.BackgroundColor3  = Color3.fromRGB(12, 12, 12)
 MainFrame.BorderSizePixel   = 0
 MainFrame.ClipsDescendants  = true
@@ -48,6 +70,7 @@ MainStroke.Color     = Color3.fromRGB(70, 70, 70)
 MainStroke.Thickness = 1.5
 MainStroke.Parent    = MainFrame
 
+-- ─── TITLE BAR ───────────────────────────────────────────────────────────────
 local TitleBar = Instance.new("Frame")
 TitleBar.Name             = "TitleBar"
 TitleBar.Size             = UDim2.new(1, 0, 0, 48)
@@ -86,6 +109,7 @@ MinBtn.BorderSizePixel   = 0
 MinBtn.Parent            = TitleBar
 Instance.new("UICorner", MinBtn).CornerRadius = UDim.new(0, 8)
 
+-- ─── SCROLL CONTENT ──────────────────────────────────────────────────────────
 local ContentFrame = Instance.new("ScrollingFrame")
 ContentFrame.Name                  = "ContentFrame"
 ContentFrame.Size                  = UDim2.new(1, 0, 1, -58)
@@ -110,7 +134,43 @@ ContentPad.Parent        = ContentFrame
 
 local ToggleRegistry = {}
 
-local function CreateToggle(name, state_key, callback)
+-- ─── UI FACTORIES ─────────────────────────────────────────────────────────────
+local function CreateSection(text)
+    local Lbl = Instance.new("TextLabel")
+    Lbl.Text              = text
+    Lbl.Size              = UDim2.new(0, 255, 0, 24)
+    Lbl.BackgroundTransparency = 1
+    Lbl.TextColor3        = Color3.fromRGB(130, 130, 130)
+    Lbl.TextSize          = 11
+    Lbl.Font              = Enum.Font.GothamBold
+    Lbl.TextXAlignment    = Enum.TextXAlignment.Left
+    Lbl.Parent            = ContentFrame
+    return Lbl
+end
+
+local function CreateInput(placeholder)
+    local Box = Instance.new("TextBox")
+    Box.Size              = UDim2.new(0, 255, 0, 36)
+    Box.BackgroundColor3  = Color3.fromRGB(18, 18, 18)
+    Box.BorderSizePixel   = 0
+    Box.PlaceholderText   = placeholder
+    Box.PlaceholderColor3 = Color3.fromRGB(75, 75, 75)
+    Box.TextColor3        = Color3.fromRGB(210, 210, 210)
+    Box.TextSize          = 12
+    Box.Font              = Enum.Font.Gotham
+    Box.ClearTextOnFocus  = false
+    Box.Text              = ""
+    Box.Parent            = ContentFrame
+    Instance.new("UICorner", Box).CornerRadius = UDim.new(0, 10)
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Color  = Color3.fromRGB(50, 50, 50)
+    Stroke.Parent = Box
+    return Box
+end
+
+local function CreateToggle(name, state_key, callback, accentOn)
+    -- accentOn: optional Color3 for the ON accent (defaults to white)
+    local onColor = accentOn or Color3.fromRGB(230, 230, 230)
     local Btn = Instance.new("TextButton")
     Btn.Name             = name
     Btn.Size             = UDim2.new(0, 255, 0, 46)
@@ -157,17 +217,17 @@ local function CreateToggle(name, state_key, callback)
 
     local function UpdateVisual()
         if State[state_key] then
-            Dot.BackgroundColor3  = Color3.fromRGB(230, 230, 230)
-            BtnStroke.Color       = Color3.fromRGB(210, 210, 210)
-            Btn.BackgroundColor3  = Color3.fromRGB(35, 35, 35)
-            StatusLabel.Text      = "ON"
-            StatusLabel.TextColor3= Color3.fromRGB(230, 230, 230)
+            Dot.BackgroundColor3   = onColor
+            BtnStroke.Color        = onColor
+            Btn.BackgroundColor3   = Color3.fromRGB(35, 35, 35)
+            StatusLabel.Text       = "ON"
+            StatusLabel.TextColor3 = onColor
         else
-            Dot.BackgroundColor3  = Color3.fromRGB(60, 60, 70)
-            BtnStroke.Color       = Color3.fromRGB(55, 55, 55)
-            Btn.BackgroundColor3  = Color3.fromRGB(25, 20, 40)
-            StatusLabel.Text      = "OFF"
-            StatusLabel.TextColor3= Color3.fromRGB(120, 120, 120)
+            Dot.BackgroundColor3   = Color3.fromRGB(60, 60, 70)
+            BtnStroke.Color        = Color3.fromRGB(55, 55, 55)
+            Btn.BackgroundColor3   = Color3.fromRGB(25, 20, 40)
+            StatusLabel.Text       = "OFF"
+            StatusLabel.TextColor3 = Color3.fromRGB(120, 120, 120)
         end
     end
 
@@ -178,79 +238,104 @@ local function CreateToggle(name, state_key, callback)
     end)
 
     UpdateVisual()
-    ToggleRegistry[state_key] = UpdateVisual
+    ToggleRegistry[state_key] = { update = UpdateVisual, callback = callback }
     return Btn
 end
 
-local function CreateSection(text)
-    local Lbl = Instance.new("TextLabel")
-    Lbl.Text              = text
-    Lbl.Size              = UDim2.new(0, 255, 0, 24)
-    Lbl.BackgroundTransparency = 1
-    Lbl.TextColor3        = Color3.fromRGB(130, 130, 130)
-    Lbl.TextSize          = 11
-    Lbl.Font              = Enum.Font.GothamBold
-    Lbl.TextXAlignment    = Enum.TextXAlignment.Left
-    Lbl.Parent            = ContentFrame
-    return Lbl
+-- sub-setting toggle (indented, smaller, for AA settings panel)
+local function CreateSubToggle(name, state_key, callback)
+    local Btn = Instance.new("TextButton")
+    Btn.Name             = name
+    Btn.Size             = UDim2.new(0, 240, 0, 38)
+    Btn.BackgroundColor3 = Color3.fromRGB(18, 14, 30)
+    Btn.BorderSizePixel  = 0
+    Btn.AutoButtonColor  = false
+    Btn.Text             = ""
+    Btn.Parent           = ContentFrame
+    Instance.new("UICorner", Btn).CornerRadius = UDim.new(0, 8)
+
+    local BtnStroke = Instance.new("UIStroke")
+    BtnStroke.Color     = Color3.fromRGB(40, 28, 60)
+    BtnStroke.Thickness = 1
+    BtnStroke.Parent    = Btn
+
+    local Dot = Instance.new("Frame")
+    Dot.Size             = UDim2.new(0, 8, 0, 8)
+    Dot.Position         = UDim2.new(0, 12, 0.5, -4)
+    Dot.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+    Dot.BorderSizePixel  = 0
+    Dot.Parent           = Btn
+    Instance.new("UICorner", Dot).CornerRadius = UDim.new(1, 0)
+
+    local BtnLabel = Instance.new("TextLabel")
+    BtnLabel.Text              = name
+    BtnLabel.Size              = UDim2.new(1, -60, 1, 0)
+    BtnLabel.Position          = UDim2.new(0, 26, 0, 0)
+    BtnLabel.BackgroundTransparency = 1
+    BtnLabel.TextColor3        = Color3.fromRGB(170, 170, 190)
+    BtnLabel.TextSize          = 12
+    BtnLabel.Font              = Enum.Font.Gotham
+    BtnLabel.TextXAlignment    = Enum.TextXAlignment.Left
+    BtnLabel.Parent            = Btn
+
+    local StatusLabel = Instance.new("TextLabel")
+    StatusLabel.Text              = "OFF"
+    StatusLabel.Size              = UDim2.new(0, 36, 1, 0)
+    StatusLabel.Position          = UDim2.new(1, -40, 0, 0)
+    StatusLabel.BackgroundTransparency = 1
+    StatusLabel.TextColor3        = Color3.fromRGB(100, 100, 100)
+    StatusLabel.TextSize          = 10
+    StatusLabel.Font              = Enum.Font.GothamBold
+    StatusLabel.Parent            = Btn
+
+    local function UpdateVisual()
+        if State[state_key] then
+            Dot.BackgroundColor3   = Color3.fromRGB(255, 80, 80)
+            BtnStroke.Color        = Color3.fromRGB(200, 60, 60)
+            Btn.BackgroundColor3   = Color3.fromRGB(30, 18, 18)
+            StatusLabel.Text       = "ON"
+            StatusLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+        else
+            Dot.BackgroundColor3   = Color3.fromRGB(50, 50, 60)
+            BtnStroke.Color        = Color3.fromRGB(40, 28, 60)
+            Btn.BackgroundColor3   = Color3.fromRGB(18, 14, 30)
+            StatusLabel.Text       = "OFF"
+            StatusLabel.TextColor3 = Color3.fromRGB(100, 100, 100)
+        end
+    end
+
+    Btn.MouseButton1Click:Connect(function()
+        State[state_key] = not State[state_key]
+        UpdateVisual()
+        if callback then callback(State[state_key]) end
+    end)
+
+    UpdateVisual()
+    ToggleRegistry[state_key] = { update = UpdateVisual, callback = callback }
+    return Btn
 end
 
-local function CreateInput(placeholder)
+local function CreateSubInput(placeholder, default_val)
     local Box = Instance.new("TextBox")
-    Box.Size              = UDim2.new(0, 255, 0, 36)
-    Box.BackgroundColor3  = Color3.fromRGB(18, 18, 18)
+    Box.Size              = UDim2.new(0, 240, 0, 32)
+    Box.BackgroundColor3  = Color3.fromRGB(15, 12, 22)
     Box.BorderSizePixel   = 0
     Box.PlaceholderText   = placeholder
-    Box.PlaceholderColor3 = Color3.fromRGB(75, 75, 75)
-    Box.TextColor3        = Color3.fromRGB(210, 210, 210)
-    Box.TextSize          = 12
+    Box.PlaceholderColor3 = Color3.fromRGB(65, 65, 65)
+    Box.TextColor3        = Color3.fromRGB(200, 200, 220)
+    Box.TextSize          = 11
     Box.Font              = Enum.Font.Gotham
     Box.ClearTextOnFocus  = false
-    Box.Text              = ""
+    Box.Text              = default_val or ""
     Box.Parent            = ContentFrame
-    Instance.new("UICorner", Box).CornerRadius = UDim.new(0, 10)
+    Instance.new("UICorner", Box).CornerRadius = UDim.new(0, 8)
     local Stroke = Instance.new("UIStroke")
-    Stroke.Color  = Color3.fromRGB(50, 50, 50)
+    Stroke.Color  = Color3.fromRGB(40, 30, 55)
     Stroke.Parent = Box
     return Box
 end
 
--- ─── AIMBOT CORE ─────────────────────────────────────────────
-local function GetClosestTarget()
-    local vCenter  = Camera.ViewportSize / 2
-    local bestDist = State.AimbotFOV
-    local bestBone = nil
-    local boneName = State.AimHead and "Head" or "HumanoidRootPart"
-    for _, plr in ipairs(Players:GetPlayers()) do
-        if plr == LocalPlayer or not plr.Character then continue end
-        if State.TeamCheck and plr.Team == LocalPlayer.Team then continue end
-        local char = plr.Character
-        local hum  = char:FindFirstChildOfClass("Humanoid")
-        local bone = char:FindFirstChild(boneName)
-        if hum and hum.Health > 0 and bone then
-            local screenPos, onScreen = Camera:WorldToViewportPoint(bone.Position)
-            if onScreen then
-                local dist = (Vector2.new(screenPos.X, screenPos.Y) - vCenter).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    bestBone = bone
-                end
-            end
-        end
-    end
-    return bestBone
-end
-
-RunService.RenderStepped:Connect(function()
-    if not State.Aimbot then return end
-    local target = GetClosestTarget()
-    if target then
-        local goal = CFrame.new(Camera.CFrame.Position, target.Position)
-        Camera.CFrame = Camera.CFrame:Lerp(goal, State.AimbotSmooth)
-    end
-end)
-
--- ─── ESP CORE ────────────────────────────────────────────────
+-- ─── ESP / HIGHLIGHT CORE ────────────────────────────────────────────────────
 local espFolder, hlFolder
 
 local function ClearESP()
@@ -262,7 +347,7 @@ end
 
 local function BuildESP()
     ClearESP()
-    espFolder = Instance.new("Folder")
+    espFolder        = Instance.new("Folder")
     espFolder.Name   = "FPS_ESP"
     espFolder.Parent = workspace
     for _, player in ipairs(Players:GetPlayers()) do
@@ -305,51 +390,303 @@ end
 
 local function BuildHL()
     ClearHL()
-    hlFolder = Instance.new("Folder")
+    hlFolder        = Instance.new("Folder")
     hlFolder.Name   = "FPS_HL"
     hlFolder.Parent = workspace
     for _, player in ipairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local hl = Instance.new("Highlight")
-            hl.FillColor          = Color3.fromRGB(200, 100, 255)
-            hl.OutlineColor       = Color3.fromRGB(255, 255, 255)
-            hl.FillTransparency   = 0.6
-            hl.OutlineTransparency= 0
-            hl.DepthMode          = Enum.HighlightDepthMode.AlwaysOnTop
-            hl.Adornee            = player.Character
-            hl.Parent             = hlFolder
+            hl.FillColor           = Color3.fromRGB(200, 100, 255)
+            hl.OutlineColor        = Color3.fromRGB(255, 255, 255)
+            hl.FillTransparency    = 0.6
+            hl.OutlineTransparency = 0
+            hl.DepthMode           = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Adornee             = player.Character
+            hl.Parent              = hlFolder
         end
     end
 end
 
 Players.PlayerAdded:Connect(function()
-    if State.ESP then BuildESP() end
-    if State.ESPGlow then BuildHL() end
+    if State.ESP     then BuildESP() end
+    if State.ESPGlow then BuildHL()  end
 end)
 Players.PlayerRemoving:Connect(function()
-    if State.ESP then BuildESP() end
-    if State.ESPGlow then BuildHL() end
+    if State.ESP     then BuildESP() end
+    if State.ESPGlow then BuildHL()  end
 end)
 
--- ─── FEATURE LAYOUT ──────────────────────────────────────────
+-- ─── STANDARD AIMBOT ─────────────────────────────────────────────────────────
+local function GetClosestTarget()
+    local vCenter  = Camera.ViewportSize / 2
+    local bestDist = State.AimbotFOV
+    local bestBone = nil
+    local boneName = "Head" -- AA always locks head; regular aimbot respects AimHead flag below
+    if not State.AbsoluteAim then
+        boneName = State.AimHead and "Head" or "HumanoidRootPart"
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr == LocalPlayer or not plr.Character then continue end
+        if State.TeamCheck and plr.Team == LocalPlayer.Team then continue end
+        local char = plr.Character
+        local hum  = char:FindFirstChildOfClass("Humanoid")
+        local bone = char:FindFirstChild(boneName)
+        if hum and hum.Health > 0 and bone then
+            local screenPos, onScreen = Camera:WorldToViewportPoint(bone.Position)
+            if onScreen then
+                local dist = (Vector2.new(screenPos.X, screenPos.Y) - vCenter).Magnitude
+                if dist < bestDist then
+                    bestDist = dist
+                    bestBone = bone
+                end
+            end
+        end
+    end
+    return bestBone
+end
+
+RunService.RenderStepped:Connect(function()
+    -- standard aimbot only runs when AbsoluteAim is off
+    if not State.Aimbot or State.AbsoluteAim then return end
+    local target = GetClosestTarget()
+    if target then
+        local goal = CFrame.new(Camera.CFrame.Position, target.Position)
+        Camera.CFrame = Camera.CFrame:Lerp(goal, State.AimbotSmooth)
+    end
+end)
+
+-- ─── ABSOLUTE AIM ENGINE ─────────────────────────────────────────────────────
+--
+-- How it works:
+--   1. RebuildTargetList() scans ALL players, living, any position (not FOV-gated).
+--      Each entry is {player, head_bone}. List is sorted by 3D distance so
+--      nearest goes first, but AA_CycleTargets makes it cycle through the rest
+--      sequentially rather than always snapping back to nearest.
+--
+--   2. RenderStepped drives the camera — always toward the current target's Head.
+--      Smooth = AA_LockSmooth (snappier than standard aimbot so it actually locks
+--      in first-person games where camera tracks instantly).
+--
+--   3. When AA_CycleTargets is on, after the current target's Humanoid.Health
+--      reaches 0 (or they leave), AdvanceTarget() increments the index.
+--      This means if target A dies the engine slides to target B without you
+--      touching anything.
+--
+--   4. AA_AutoAttack fires every AA_AttackDelay seconds on Heartbeat.
+--      It uses VirtualUser:CaptureController() + Button1Down at the center of
+--      the screen — that triggers whatever tool the player is holding in first-
+--      person. Works for most FPS games on Roblox that use default mouse-click
+--      to fire. Games with custom input hooks may need firesignal instead
+--      (see note at bottom of this section).
+--
+--   5. AA_ShowESP builds ESP + Highlight when the engine starts so dj can see
+--      every enemy through walls while AA handles the rest.
+
+local function RebuildTargetList()
+    aaTargetList = {}
+    local hrp = HumanoidRootPart
+    if not hrp then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr == LocalPlayer or not plr.Character then continue end
+        if State.TeamCheck and plr.Team == LocalPlayer.Team then continue end
+        local char = plr.Character
+        local hum  = char:FindFirstChildOfClass("Humanoid")
+        local head = char:FindFirstChild("Head")
+        local root = char:FindFirstChild("HumanoidRootPart")
+        -- include even targets NOT on screen — AbsoluteAim sees through walls
+        if hum and hum.Health > 0 and head and root then
+            local dist = (root.Position - hrp.Position).Magnitude
+            table.insert(aaTargetList, { player = plr, bone = head, dist = dist })
+        end
+    end
+    -- sort nearest first
+    table.sort(aaTargetList, function(a, b) return a.dist < b.dist end)
+    aaTargetIndex = 1
+end
+
+local function GetCurrentAATarget()
+    if #aaTargetList == 0 then return nil end
+    -- clamp index
+    if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
+    local entry = aaTargetList[aaTargetIndex]
+    -- validate still alive
+    local hum = entry.player.Character
+        and entry.player.Character:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        -- dead — advance and return next
+        aaTargetIndex = aaTargetIndex + 1
+        if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
+        return GetCurrentAATarget()
+    end
+    return entry.bone
+end
+
+local function AdvanceTarget()
+    if #aaTargetList == 0 then return end
+    aaTargetIndex = aaTargetIndex + 1
+    if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
+end
+
+local function StartAbsoluteAim()
+    -- stop if already running
+    if aaConn then aaConn:Disconnect() aaConn = nil end
+    if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
+
+    -- force visuals on if setting says so
+    if State.AA_ShowESP then
+        BuildESP()
+        BuildHL()
+        -- mirror State so the toggle buttons show ON
+        State.ESP     = true
+        State.ESPGlow = true
+        if ToggleRegistry["ESP"]     then ToggleRegistry["ESP"].update()     end
+        if ToggleRegistry["ESPGlow"] then ToggleRegistry["ESPGlow"].update() end
+    end
+
+    -- initial scan
+    RebuildTargetList()
+
+    -- rebuild list every 3s in case players join/die
+    task.spawn(function()
+        while State.AbsoluteAim do
+            task.wait(3)
+            if State.AbsoluteAim then
+                RebuildTargetList()
+            end
+        end
+    end)
+
+    -- RenderStepped: camera lock to current target Head
+    aaConn = RunService.RenderStepped:Connect(function()
+        if not State.AbsoluteAim then return end
+        local bone = GetCurrentAATarget()
+        if bone then
+            local goal = CFrame.new(Camera.CFrame.Position, bone.Position)
+            Camera.CFrame = Camera.CFrame:Lerp(goal, State.AA_LockSmooth)
+        end
+    end)
+
+    -- Heartbeat: auto-attack pulse
+    if State.AA_AutoAttack then
+        aaAttackConn = RunService.Heartbeat:Connect(function()
+            if not State.AbsoluteAim or not State.AA_AutoAttack then return end
+            local now = tick()
+            if now - aaLastAttack < State.AA_AttackDelay then return end
+            aaLastAttack = now
+
+            -- fire at screen center — works for standard FPS tools
+            local vc = Camera.ViewportSize
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:Button1Down(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
+                task.wait(0.05)
+                VirtualUser:Button1Up(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
+            end)
+
+            -- cycle to next target after each attack if CycleTargets is on
+            if State.AA_CycleTargets then
+                AdvanceTarget()
+            end
+        end)
+    end
+end
+
+local function StopAbsoluteAim()
+    if aaConn       then aaConn:Disconnect()       aaConn       = nil end
+    if aaAttackConn then aaAttackConn:Disconnect()  aaAttackConn = nil end
+    aaTargetList  = {}
+    aaTargetIndex = 1
+end
+
+-- ─── FEATURE LAYOUT ──────────────────────────────────────────────────────────
+
+-- ── SECTION: AIMBOT (standard) ───────────────────────────────────────────────
 CreateSection("  AIMBOT")
 
-local fovInput = CreateInput("FOV radius (default 150)")
+local fovInput = CreateInput("FOV radius (default 800 = all screen)")
 fovInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(fovInput.Text)
-    State.AimbotFOV = v and math.clamp(v, 10, 800) or 150
+    State.AimbotFOV = v and math.clamp(v, 10, 9999) or 800
 end)
 
-local smoothInput = CreateInput("smooth 1–20 (default 8)")
+local smoothInput = CreateInput("smooth 1-20 (default 8)")
 smoothInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(smoothInput.Text)
     State.AimbotSmooth = v and math.clamp(v, 1, 20) / 100 or 0.08
 end)
 
-CreateToggle("Aimbot", "Aimbot", function(_) end)
-CreateToggle("Aim at Head", "AimHead", function(_) end)
-CreateToggle("Team Check", "TeamCheck", function(_) end)
+CreateToggle("Aimbot",      "Aimbot",    function(_) end)
+CreateToggle("Aim at Head", "AimHead",   function(_) end)
+CreateToggle("Team Check",  "TeamCheck", function(_) end)
 
+-- ── SECTION: ABSOLUTE AIM ────────────────────────────────────────────────────
+CreateSection("  ABSOLUTE AIM")
+
+-- main toggle — red accent so it's visually distinct
+CreateToggle("Absolute Aim", "AbsoluteAim", function(on)
+    if on then
+        StartAbsoluteAim()
+    else
+        StopAbsoluteAim()
+    end
+end, Color3.fromRGB(255, 80, 80))
+
+-- sub-settings label
+local SubLbl = Instance.new("TextLabel")
+SubLbl.Text              = "  ↳ Absolute Aim Settings"
+SubLbl.Size              = UDim2.new(0, 240, 0, 20)
+SubLbl.BackgroundTransparency = 1
+SubLbl.TextColor3        = Color3.fromRGB(100, 100, 120)
+SubLbl.TextSize          = 10
+SubLbl.Font              = Enum.Font.GothamBold
+SubLbl.TextXAlignment    = Enum.TextXAlignment.Left
+SubLbl.Parent            = ContentFrame
+
+-- Auto Attack
+CreateSubToggle("Auto Attack (fires weapon automatically)", "AA_AutoAttack", function(on)
+    -- if AA is already running, restart the attack heartbeat
+    if State.AbsoluteAim then
+        if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
+        if on then
+            aaAttackConn = RunService.Heartbeat:Connect(function()
+                if not State.AbsoluteAim or not State.AA_AutoAttack then return end
+                local now = tick()
+                if now - aaLastAttack < State.AA_AttackDelay then return end
+                aaLastAttack = now
+                local vc = Camera.ViewportSize
+                pcall(function()
+                    VirtualUser:CaptureController()
+                    VirtualUser:Button1Down(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
+                    task.wait(0.05)
+                    VirtualUser:Button1Up(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
+                end)
+                if State.AA_CycleTargets then AdvanceTarget() end
+            end)
+        end
+    end
+end)
+
+-- Cycle Targets
+CreateSubToggle("Cycle Targets (auto-switch after each shot)", "AA_CycleTargets", function(_) end)
+
+-- Show ESP on start
+CreateSubToggle("Force ESP on (see all enemies through walls)", "AA_ShowESP", function(_) end)
+
+-- Attack delay input
+local delayInput = CreateSubInput("Attack delay seconds (default 0.35)", "0.35")
+delayInput:GetPropertyChangedSignal("Text"):Connect(function()
+    local v = tonumber(delayInput.Text)
+    State.AA_AttackDelay = v and math.clamp(v, 0.05, 5.0) or 0.35
+end)
+
+-- Lock smooth input
+local lockSmoothInput = CreateSubInput("Lock smooth 1-100 (default 25 = instant)", "25")
+lockSmoothInput:GetPropertyChangedSignal("Text"):Connect(function()
+    local v = tonumber(lockSmoothInput.Text)
+    State.AA_LockSmooth = v and math.clamp(v, 1, 100) / 100 or 0.25
+end)
+
+-- ── SECTION: VISUALS ─────────────────────────────────────────────────────────
 CreateSection("  VISUALS")
 
 CreateToggle("Player ESP", "ESP", function(on)
@@ -359,10 +696,11 @@ CreateToggle("ESP Highlight Glow", "ESPGlow", function(on)
     if on then BuildHL() else ClearHL() end
 end)
 
+-- ── SECTION: CONSOLE ─────────────────────────────────────────────────────────
 CreateSection("  CONSOLE")
 
 local Console = Instance.new("TextLabel")
-Console.Size              = UDim2.new(0, 255, 0, 52)
+Console.Size              = UDim2.new(0, 255, 0, 62)
 Console.BackgroundColor3  = Color3.fromRGB(8, 8, 8)
 Console.BorderSizePixel   = 0
 Console.TextColor3        = Color3.fromRGB(180, 255, 180)
@@ -379,6 +717,7 @@ ConsolePad.PaddingLeft = UDim.new(0, 8)
 ConsolePad.PaddingTop  = UDim.new(0, 6)
 ConsolePad.Parent      = Console
 
+-- scan button — shows full target list now
 local ScanBtn = Instance.new("TextButton")
 ScanBtn.Size             = UDim2.new(0, 255, 0, 40)
 ScanBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
@@ -392,60 +731,59 @@ ScanStroke.Color     = Color3.fromRGB(55, 55, 55)
 ScanStroke.Thickness = 1
 ScanStroke.Parent    = ScanBtn
 local ScanLbl = Instance.new("TextLabel")
-ScanLbl.Text          = "Scan Nearest Target"
-ScanLbl.Size          = UDim2.new(1, 0, 1, 0)
+ScanLbl.Text                   = "Scan All Targets"
+ScanLbl.Size                   = UDim2.new(1, 0, 1, 0)
 ScanLbl.BackgroundTransparency = 1
-ScanLbl.TextColor3    = Color3.fromRGB(210, 210, 210)
-ScanLbl.TextSize      = 13
-ScanLbl.Font          = Enum.Font.GothamBold
-ScanLbl.Parent        = ScanBtn
+ScanLbl.TextColor3             = Color3.fromRGB(210, 210, 210)
+ScanLbl.TextSize               = 13
+ScanLbl.Font                   = Enum.Font.GothamBold
+ScanLbl.Parent                 = ScanBtn
 ScanBtn.MouseButton1Click:Connect(function()
-    local bone = GetClosestTarget()
-    if bone then
-        local plr    = Players:GetPlayerFromCharacter(bone.Parent)
-        local sp, _  = Camera:WorldToViewportPoint(bone.Position)
-        local vc     = Camera.ViewportSize / 2
-        local px     = (Vector2.new(sp.X, sp.Y) - vc).Magnitude
-        local dist3D = (bone.Position - Camera.CFrame.Position).Magnitude
-        Console.Text = string.format(
-            "> target: %s\n> dist3D: %.0f studs\n> screen: %.0fpx / FOV %d",
-            plr and plr.Name or "?", dist3D, px, State.AimbotFOV
-        )
-    else
-        Console.Text = "> no target in FOV\n> raise FOV or move\n> aimbot stays off"
+    RebuildTargetList()
+    if #aaTargetList == 0 then
+        Console.Text = "> no enemies found\n> check team check setting"
+        return
     end
+    -- show first 3 targets with distances
+    local lines = {string.format("> %d enemies detected:", #aaTargetList)}
+    for i = 1, math.min(3, #aaTargetList) do
+        local e = aaTargetList[i]
+        table.insert(lines, string.format("> #%d %s  %.0f studs", i, e.player.Name, e.dist))
+    end
+    Console.Text = table.concat(lines, "\n")
 end)
 
--- ─── BACK TO MENU ─────────────────────────────────────────────
+-- ─── BACK TO MENU ────────────────────────────────────────────────────────────
 local BackBtn2 = Instance.new("TextButton")
-BackBtn2.Name            = "BackToMenu"
-BackBtn2.Size            = UDim2.new(0, 255, 0, 46)
-BackBtn2.BackgroundColor3= Color3.fromRGB(20, 15, 35)
-BackBtn2.BorderSizePixel = 0
-BackBtn2.AutoButtonColor = false
-BackBtn2.Text            = ""
-BackBtn2.Parent          = ContentFrame
+BackBtn2.Name             = "BackToMenu"
+BackBtn2.Size             = UDim2.new(0, 255, 0, 46)
+BackBtn2.BackgroundColor3 = Color3.fromRGB(20, 15, 35)
+BackBtn2.BorderSizePixel  = 0
+BackBtn2.AutoButtonColor  = false
+BackBtn2.Text             = ""
+BackBtn2.Parent           = ContentFrame
 Instance.new("UICorner", BackBtn2).CornerRadius = UDim.new(0, 10)
 local BackStroke2 = Instance.new("UIStroke")
 BackStroke2.Color     = Color3.fromRGB(80, 60, 110)
 BackStroke2.Thickness = 1
 BackStroke2.Parent    = BackBtn2
 local BackLbl2 = Instance.new("TextLabel")
-BackLbl2.Text             = "← Back to Menu"
-BackLbl2.Size             = UDim2.new(1, 0, 1, 0)
+BackLbl2.Text                   = "← Back to Menu"
+BackLbl2.Size                   = UDim2.new(1, 0, 1, 0)
 BackLbl2.BackgroundTransparency = 1
-BackLbl2.TextColor3       = Color3.fromRGB(180, 150, 220)
-BackLbl2.TextSize         = 13
-BackLbl2.Font             = Enum.Font.GothamBold
-BackLbl2.Parent           = BackBtn2
+BackLbl2.TextColor3             = Color3.fromRGB(180, 150, 220)
+BackLbl2.TextSize               = 13
+BackLbl2.Font                   = Enum.Font.GothamBold
+BackLbl2.Parent                 = BackBtn2
 BackBtn2.MouseButton1Click:Connect(function()
+    StopAbsoluteAim()
     ClearESP()
     ClearHL()
     ScreenGui:Destroy()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/jebnnna/roblox_cs/main/Menu.txt"))()
 end)
 
--- ─── DRAG ─────────────────────────────────────────────────────
+-- ─── DRAG ────────────────────────────────────────────────────────────────────
 local dragging, dragInput, dragStart, startPos
 TitleBar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch
@@ -474,29 +812,52 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
--- ─── MINIMIZE ─────────────────────────────────────────────────
+-- ─── MINIMIZE ────────────────────────────────────────────────────────────────
 local minimized = false
 MinBtn.MouseButton1Click:Connect(function()
     minimized = not minimized
     local targetSize = minimized
         and UDim2.new(0, 280, 0, 48)
-        or  UDim2.new(0, 280, 0, 420)
+        or  UDim2.new(0, 280, 0, 520)
     TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quad), {Size = targetSize}):Play()
     MinBtn.Text          = minimized and "+" or "—"
     ContentFrame.Visible = not minimized
 end)
 
--- ─── DEATH RESET ──────────────────────────────────────────────
+-- ─── DEATH HANDLER ───────────────────────────────────────────────────────────
 LocalPlayer.CharacterAdded:Connect(function(char)
     Character        = char
     Humanoid         = char:WaitForChild("Humanoid")
     HumanoidRootPart = char:WaitForChild("HumanoidRootPart")
-    State.Aimbot     = false
-    State.AimHead    = false
-    State.TeamCheck  = false
-    State.ESP        = false
-    State.ESPGlow    = false
-    ClearESP()
-    ClearHL()
-    for _, updateFn in pairs(ToggleRegistry) do updateFn() end
+
+    if State.ESP     then BuildESP() end
+    if State.ESPGlow then BuildHL()  end
+
+    -- rebuild AA target list with fresh character reference
+    if State.AbsoluteAim then
+        task.wait(0.5)
+        RebuildTargetList()
+    end
+
+    for _, entry in pairs(ToggleRegistry) do
+        entry.update()
+    end
 end)
+
+--[[
+NOTE — games that use custom input / block VirtualUser:
+If auto-attack doesn't fire in a specific game, the game is blocking
+VirtualUser. Try replacing the attack block with:
+
+    local tool = LocalPlayer.Character and
+                 LocalPlayer.Character:FindFirstChildOfClass("Tool")
+    if tool and tool:FindFirstChild("RemoteEvent") then
+        tool.RemoteEvent:FireServer(...)  -- args vary by game
+    end
+
+Or use firesignal on the tool's Activated event:
+    firesignal(tool.Activated)
+
+Offset hunting those remotes is game-specific — use the Scanner or
+UiScanner to find them.
+]]
