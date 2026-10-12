@@ -1,6 +1,6 @@
 -- FPS Shooter Helper | Delta Executor | Roblox Mobile
 -- Language: Lua 5.1 (Roblox Luau)
--- Features: Aimbot + ESP + Highlight Glow + Absolute Aim (full auto engine)
+-- Features: Aimbot + ESP + Highlight Glow + Absolute Aim
 
 local Players          = game:GetService("Players")
 local RunService       = game:GetService("RunService")
@@ -16,34 +16,33 @@ local Camera           = workspace.CurrentCamera
 
 -- ─── STATE ───────────────────────────────────────────────────────────────────
 local State = {
-    -- original toggles
     Aimbot          = false,
     AimHead         = false,
     TeamCheck       = false,
     ESP             = false,
     ESPGlow         = false,
-    AimbotFOV       = 800,   -- widened default so AbsoluteAim sees everything
+    AimbotFOV       = 150,
     AimbotSmooth    = 0.08,
 
-    -- Absolute Aim engine
     AbsoluteAim     = false,
 
-    -- Absolute Aim sub-settings (only active when AbsoluteAim = true)
-    AA_AutoAttack   = false,  -- fires tool / clicks automatically
-    AA_CycleTargets = true,   -- rotate through all alive targets, not just nearest
-    AA_ShowESP      = true,   -- force-build ESP+Glow when engine is on
-    AA_AttackDelay  = 0.35,   -- seconds between each auto-attack pulse
-    AA_LockSmooth   = 0.25,   -- lerp strength while AA is running (snappier than aimbot)
+    -- sub-settings
+    AA_AutoAttack   = false,
+    AA_CycleTargets = true,
+    AA_ShowESP      = true,
+    AA_AttackDelay  = 0.35,
+    -- snap strength: 1.0 = instant, 0.5 = half-frame, keep it at 1.0 by default
+    -- user can lower it via input if they want slight smoothing
+    AA_LockSmooth   = 1.0,
 }
 
--- internal AA runtime vars
-local aaTargetList   = {}   -- ordered list of {player, bone} pairs, rebuilt each cycle
-local aaTargetIndex  = 1    -- current position in the list
-local aaLastAttack   = 0    -- tick() of last attack fire
-local aaConn         = nil  -- RenderStepped connection handle
-local aaAttackConn   = nil  -- Heartbeat connection handle for attack pulse
+local aaTargetList   = {}
+local aaTargetIndex  = 1
+local aaLastAttack   = 0
+local aaConn         = nil
+local aaAttackConn   = nil
 
--- ─── GUI CLEANUP ─────────────────────────────────────────────────────────────
+-- ─── CLEANUP ─────────────────────────────────────────────────────────────────
 if game:GetService("CoreGui"):FindFirstChild("FPS_HelperGUI") then
     game:GetService("CoreGui").FPS_HelperGUI:Destroy()
 end
@@ -169,7 +168,6 @@ local function CreateInput(placeholder)
 end
 
 local function CreateToggle(name, state_key, callback, accentOn)
-    -- accentOn: optional Color3 for the ON accent (defaults to white)
     local onColor = accentOn or Color3.fromRGB(230, 230, 230)
     local Btn = Instance.new("TextButton")
     Btn.Name             = name
@@ -242,7 +240,6 @@ local function CreateToggle(name, state_key, callback, accentOn)
     return Btn
 end
 
--- sub-setting toggle (indented, smaller, for AA settings panel)
 local function CreateSubToggle(name, state_key, callback)
     local Btn = Instance.new("TextButton")
     Btn.Name             = name
@@ -335,7 +332,7 @@ local function CreateSubInput(placeholder, default_val)
     return Box
 end
 
--- ─── ESP / HIGHLIGHT CORE ────────────────────────────────────────────────────
+-- ─── ESP / HIGHLIGHT ─────────────────────────────────────────────────────────
 local espFolder, hlFolder
 
 local function ClearESP()
@@ -421,10 +418,7 @@ local function GetClosestTarget()
     local vCenter  = Camera.ViewportSize / 2
     local bestDist = State.AimbotFOV
     local bestBone = nil
-    local boneName = "Head" -- AA always locks head; regular aimbot respects AimHead flag below
-    if not State.AbsoluteAim then
-        boneName = State.AimHead and "Head" or "HumanoidRootPart"
-    end
+    local boneName = State.AimHead and "Head" or "HumanoidRootPart"
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer or not plr.Character then continue end
         if State.TeamCheck and plr.Team == LocalPlayer.Team then continue end
@@ -446,7 +440,6 @@ local function GetClosestTarget()
 end
 
 RunService.RenderStepped:Connect(function()
-    -- standard aimbot only runs when AbsoluteAim is off
     if not State.Aimbot or State.AbsoluteAim then return end
     local target = GetClosestTarget()
     if target then
@@ -457,35 +450,23 @@ end)
 
 -- ─── ABSOLUTE AIM ENGINE ─────────────────────────────────────────────────────
 --
--- How it works:
---   1. RebuildTargetList() scans ALL players, living, any position (not FOV-gated).
---      Each entry is {player, head_bone}. List is sorted by 3D distance so
---      nearest goes first, but AA_CycleTargets makes it cycle through the rest
---      sequentially rather than always snapping back to nearest.
+-- KEY CHANGE vs previous version:
 --
---   2. RenderStepped drives the camera — always toward the current target's Head.
---      Smooth = AA_LockSmooth (snappier than standard aimbot so it actually locks
---      in first-person games where camera tracks instantly).
+-- Target selection: WorldToViewportPoint onScreen=true gate is back.
+-- Only players the camera can actually see (not behind a wall) enter the list.
+-- RebuildTargetList still sorts by 3D distance among visible targets.
 --
---   3. When AA_CycleTargets is on, after the current target's Humanoid.Health
---      reaches 0 (or they leave), AdvanceTarget() increments the index.
---      This means if target A dies the engine slides to target B without you
---      touching anything.
---
---   4. AA_AutoAttack fires every AA_AttackDelay seconds on Heartbeat.
---      It uses VirtualUser:CaptureController() + Button1Down at the center of
---      the screen — that triggers whatever tool the player is holding in first-
---      person. Works for most FPS games on Roblox that use default mouse-click
---      to fire. Games with custom input hooks may need firesignal instead
---      (see note at bottom of this section).
---
---   5. AA_ShowESP builds ESP + Highlight when the engine starts so dj can see
---      every enemy through walls while AA handles the rest.
+-- Lock strength: Camera.CFrame is SET directly (no Lerp) when AA_LockSmooth
+-- is at 1.0 (default). This is effectively 0 delay — one RenderStepped frame
+-- and the camera is already on the head. If dj wants slight motion instead of
+-- a hard snap, they can drop the sub-input value (e.g. 90 = 0.9 lerp, still
+-- extremely fast but visually has one frame of travel).
 
 local function RebuildTargetList()
     aaTargetList = {}
     local hrp = HumanoidRootPart
     if not hrp then return end
+
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer or not plr.Character then continue end
         if State.TeamCheck and plr.Team == LocalPlayer.Team then continue end
@@ -493,29 +474,51 @@ local function RebuildTargetList()
         local hum  = char:FindFirstChildOfClass("Humanoid")
         local head = char:FindFirstChild("Head")
         local root = char:FindFirstChild("HumanoidRootPart")
-        -- include even targets NOT on screen — AbsoluteAim sees through walls
+
         if hum and hum.Health > 0 and head and root then
+            -- *** VISIBLE-ONLY GATE ***
+            -- WorldToViewportPoint returns onScreen=true only when the point
+            -- is in front of the camera frustum — it does NOT raycast walls.
+            -- To also reject players behind geometry we cast a ray from the
+            -- camera to the head. If the first hit is NOT the target character
+            -- we skip them.
+            local _, onScreen = Camera:WorldToViewportPoint(head.Position)
+            if not onScreen then continue end
+
+            -- raycast wall check: camera → head
+            local origin    = Camera.CFrame.Position
+            local direction = (head.Position - origin)
+            local rayResult = workspace:Raycast(
+                origin,
+                direction,
+                RaycastParams.new() -- default params hit everything
+            )
+            -- if ray hit something that is NOT part of this character, skip
+            if rayResult and not char:IsAncestorOf(rayResult.Instance)
+                        and rayResult.Instance ~= head
+                        and rayResult.Instance ~= root then
+                continue
+            end
+
             local dist = (root.Position - hrp.Position).Magnitude
             table.insert(aaTargetList, { player = plr, bone = head, dist = dist })
         end
     end
-    -- sort nearest first
+
     table.sort(aaTargetList, function(a, b) return a.dist < b.dist end)
     aaTargetIndex = 1
 end
 
 local function GetCurrentAATarget()
     if #aaTargetList == 0 then return nil end
-    -- clamp index
     if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
     local entry = aaTargetList[aaTargetIndex]
-    -- validate still alive
-    local hum = entry.player.Character
+    local hum   = entry.player.Character
         and entry.player.Character:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then
-        -- dead — advance and return next
         aaTargetIndex = aaTargetIndex + 1
         if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
+        if #aaTargetList == 1 then return nil end -- only dead target was in list
         return GetCurrentAATarget()
     end
     return entry.bone
@@ -528,53 +531,52 @@ local function AdvanceTarget()
 end
 
 local function StartAbsoluteAim()
-    -- stop if already running
-    if aaConn then aaConn:Disconnect() aaConn = nil end
+    if aaConn       then aaConn:Disconnect()      aaConn       = nil end
     if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
 
-    -- force visuals on if setting says so
     if State.AA_ShowESP then
         BuildESP()
         BuildHL()
-        -- mirror State so the toggle buttons show ON
         State.ESP     = true
         State.ESPGlow = true
         if ToggleRegistry["ESP"]     then ToggleRegistry["ESP"].update()     end
         if ToggleRegistry["ESPGlow"] then ToggleRegistry["ESPGlow"].update() end
     end
 
-    -- initial scan
     RebuildTargetList()
 
-    -- rebuild list every 3s in case players join/die
+    -- refresh visible target list every 1.5s (shorter interval because
+    -- targets move in and out of view frequently in FPS games)
     task.spawn(function()
         while State.AbsoluteAim do
-            task.wait(3)
-            if State.AbsoluteAim then
-                RebuildTargetList()
-            end
+            task.wait(1.5)
+            if State.AbsoluteAim then RebuildTargetList() end
         end
     end)
 
-    -- RenderStepped: camera lock to current target Head
+    -- RenderStepped: lock camera to visible target head
     aaConn = RunService.RenderStepped:Connect(function()
         if not State.AbsoluteAim then return end
         local bone = GetCurrentAATarget()
-        if bone then
-            local goal = CFrame.new(Camera.CFrame.Position, bone.Position)
+        if not bone then return end
+
+        local goal = CFrame.new(Camera.CFrame.Position, bone.Position)
+
+        if State.AA_LockSmooth >= 1.0 then
+            -- hard snap — direct set, zero latency
+            Camera.CFrame = goal
+        else
             Camera.CFrame = Camera.CFrame:Lerp(goal, State.AA_LockSmooth)
         end
     end)
 
-    -- Heartbeat: auto-attack pulse
+    -- attack heartbeat
     if State.AA_AutoAttack then
         aaAttackConn = RunService.Heartbeat:Connect(function()
             if not State.AbsoluteAim or not State.AA_AutoAttack then return end
             local now = tick()
             if now - aaLastAttack < State.AA_AttackDelay then return end
             aaLastAttack = now
-
-            -- fire at screen center — works for standard FPS tools
             local vc = Camera.ViewportSize
             pcall(function()
                 VirtualUser:CaptureController()
@@ -582,31 +584,26 @@ local function StartAbsoluteAim()
                 task.wait(0.05)
                 VirtualUser:Button1Up(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
             end)
-
-            -- cycle to next target after each attack if CycleTargets is on
-            if State.AA_CycleTargets then
-                AdvanceTarget()
-            end
+            if State.AA_CycleTargets then AdvanceTarget() end
         end)
     end
 end
 
 local function StopAbsoluteAim()
-    if aaConn       then aaConn:Disconnect()       aaConn       = nil end
-    if aaAttackConn then aaAttackConn:Disconnect()  aaAttackConn = nil end
+    if aaConn       then aaConn:Disconnect()      aaConn       = nil end
+    if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
     aaTargetList  = {}
     aaTargetIndex = 1
 end
 
 -- ─── FEATURE LAYOUT ──────────────────────────────────────────────────────────
 
--- ── SECTION: AIMBOT (standard) ───────────────────────────────────────────────
 CreateSection("  AIMBOT")
 
-local fovInput = CreateInput("FOV radius (default 800 = all screen)")
+local fovInput = CreateInput("FOV radius (default 150)")
 fovInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(fovInput.Text)
-    State.AimbotFOV = v and math.clamp(v, 10, 9999) or 800
+    State.AimbotFOV = v and math.clamp(v, 10, 9999) or 150
 end)
 
 local smoothInput = CreateInput("smooth 1-20 (default 8)")
@@ -619,19 +616,12 @@ CreateToggle("Aimbot",      "Aimbot",    function(_) end)
 CreateToggle("Aim at Head", "AimHead",   function(_) end)
 CreateToggle("Team Check",  "TeamCheck", function(_) end)
 
--- ── SECTION: ABSOLUTE AIM ────────────────────────────────────────────────────
 CreateSection("  ABSOLUTE AIM")
 
--- main toggle — red accent so it's visually distinct
 CreateToggle("Absolute Aim", "AbsoluteAim", function(on)
-    if on then
-        StartAbsoluteAim()
-    else
-        StopAbsoluteAim()
-    end
+    if on then StartAbsoluteAim() else StopAbsoluteAim() end
 end, Color3.fromRGB(255, 80, 80))
 
--- sub-settings label
 local SubLbl = Instance.new("TextLabel")
 SubLbl.Text              = "  ↳ Absolute Aim Settings"
 SubLbl.Size              = UDim2.new(0, 240, 0, 20)
@@ -642,9 +632,7 @@ SubLbl.Font              = Enum.Font.GothamBold
 SubLbl.TextXAlignment    = Enum.TextXAlignment.Left
 SubLbl.Parent            = ContentFrame
 
--- Auto Attack
 CreateSubToggle("Auto Attack (fires weapon automatically)", "AA_AutoAttack", function(on)
-    -- if AA is already running, restart the attack heartbeat
     if State.AbsoluteAim then
         if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
         if on then
@@ -666,27 +654,29 @@ CreateSubToggle("Auto Attack (fires weapon automatically)", "AA_AutoAttack", fun
     end
 end)
 
--- Cycle Targets
-CreateSubToggle("Cycle Targets (auto-switch after each shot)", "AA_CycleTargets", function(_) end)
+CreateSubToggle("Cycle Targets (switch after each shot)", "AA_CycleTargets", function(_) end)
+CreateSubToggle("Force ESP on (see enemies clearly)",     "AA_ShowESP",      function(_) end)
 
--- Show ESP on start
-CreateSubToggle("Force ESP on (see all enemies through walls)", "AA_ShowESP", function(_) end)
-
--- Attack delay input
-local delayInput = CreateSubInput("Attack delay seconds (default 0.35)", "0.35")
+local delayInput = CreateSubInput("Attack delay in seconds (default 0.35)", "0.35")
 delayInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(delayInput.Text)
     State.AA_AttackDelay = v and math.clamp(v, 0.05, 5.0) or 0.35
 end)
 
--- Lock smooth input
-local lockSmoothInput = CreateSubInput("Lock smooth 1-100 (default 25 = instant)", "25")
+-- Lock smooth: 100 = instant hard snap (default), lower = smoother travel
+-- at 90 it still locks in one frame on 60fps, just with a tiny visible arc
+local lockSmoothInput = CreateSubInput("Lock speed 1-100  (100 = instant snap)", "100")
 lockSmoothInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(lockSmoothInput.Text)
-    State.AA_LockSmooth = v and math.clamp(v, 1, 100) / 100 or 0.25
+    if v then
+        local clamped = math.clamp(v, 1, 100)
+        -- 100 triggers the direct-set path, anything below uses Lerp
+        State.AA_LockSmooth = clamped >= 100 and 1.0 or (clamped / 100)
+    else
+        State.AA_LockSmooth = 1.0
+    end
 end)
 
--- ── SECTION: VISUALS ─────────────────────────────────────────────────────────
 CreateSection("  VISUALS")
 
 CreateToggle("Player ESP", "ESP", function(on)
@@ -696,7 +686,6 @@ CreateToggle("ESP Highlight Glow", "ESPGlow", function(on)
     if on then BuildHL() else ClearHL() end
 end)
 
--- ── SECTION: CONSOLE ─────────────────────────────────────────────────────────
 CreateSection("  CONSOLE")
 
 local Console = Instance.new("TextLabel")
@@ -717,7 +706,6 @@ ConsolePad.PaddingLeft = UDim.new(0, 8)
 ConsolePad.PaddingTop  = UDim.new(0, 6)
 ConsolePad.Parent      = Console
 
--- scan button — shows full target list now
 local ScanBtn = Instance.new("TextButton")
 ScanBtn.Size             = UDim2.new(0, 255, 0, 40)
 ScanBtn.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
@@ -731,7 +719,7 @@ ScanStroke.Color     = Color3.fromRGB(55, 55, 55)
 ScanStroke.Thickness = 1
 ScanStroke.Parent    = ScanBtn
 local ScanLbl = Instance.new("TextLabel")
-ScanLbl.Text                   = "Scan All Targets"
+ScanLbl.Text                   = "Scan Visible Targets"
 ScanLbl.Size                   = UDim2.new(1, 0, 1, 0)
 ScanLbl.BackgroundTransparency = 1
 ScanLbl.TextColor3             = Color3.fromRGB(210, 210, 210)
@@ -741,11 +729,10 @@ ScanLbl.Parent                 = ScanBtn
 ScanBtn.MouseButton1Click:Connect(function()
     RebuildTargetList()
     if #aaTargetList == 0 then
-        Console.Text = "> no enemies found\n> check team check setting"
+        Console.Text = "> no visible enemies\n> move until you see one\n> then scan again"
         return
     end
-    -- show first 3 targets with distances
-    local lines = {string.format("> %d enemies detected:", #aaTargetList)}
+    local lines = { string.format("> %d visible enemies:", #aaTargetList) }
     for i = 1, math.min(3, #aaTargetList) do
         local e = aaTargetList[i]
         table.insert(lines, string.format("> #%d %s  %.0f studs", i, e.player.Name, e.dist))
@@ -753,7 +740,6 @@ ScanBtn.MouseButton1Click:Connect(function()
     Console.Text = table.concat(lines, "\n")
 end)
 
--- ─── BACK TO MENU ────────────────────────────────────────────────────────────
 local BackBtn2 = Instance.new("TextButton")
 BackBtn2.Name             = "BackToMenu"
 BackBtn2.Size             = UDim2.new(0, 255, 0, 46)
@@ -833,7 +819,6 @@ LocalPlayer.CharacterAdded:Connect(function(char)
     if State.ESP     then BuildESP() end
     if State.ESPGlow then BuildHL()  end
 
-    -- rebuild AA target list with fresh character reference
     if State.AbsoluteAim then
         task.wait(0.5)
         RebuildTargetList()
@@ -843,21 +828,3 @@ LocalPlayer.CharacterAdded:Connect(function(char)
         entry.update()
     end
 end)
-
---[[
-NOTE — games that use custom input / block VirtualUser:
-If auto-attack doesn't fire in a specific game, the game is blocking
-VirtualUser. Try replacing the attack block with:
-
-    local tool = LocalPlayer.Character and
-                 LocalPlayer.Character:FindFirstChildOfClass("Tool")
-    if tool and tool:FindFirstChild("RemoteEvent") then
-        tool.RemoteEvent:FireServer(...)  -- args vary by game
-    end
-
-Or use firesignal on the tool's Activated event:
-    firesignal(tool.Activated)
-
-Offset hunting those remotes is game-specific — use the Scanner or
-UiScanner to find them.
-]]
