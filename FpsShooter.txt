@@ -25,14 +25,10 @@ local State = {
     AimbotSmooth    = 0.08,
 
     AbsoluteAim     = false,
-
-    -- sub-settings
     AA_AutoAttack   = false,
     AA_CycleTargets = true,
     AA_ShowESP      = true,
     AA_AttackDelay  = 0.35,
-    -- snap strength: 1.0 = instant, 0.5 = half-frame, keep it at 1.0 by default
-    -- user can lower it via input if they want slight smoothing
     AA_LockSmooth   = 1.0,
 }
 
@@ -413,6 +409,26 @@ Players.PlayerRemoving:Connect(function()
     if State.ESPGlow then BuildHL()  end
 end)
 
+-- ─── VISIBILITY CHECK ────────────────────────────────────────────────────────
+-- No raycast. No wall detection. Just frustum check.
+-- WorldToViewportPoint onScreen=true means the point is inside the camera
+-- view frustum AND in front of the near plane. That is all we need.
+-- We check THREE bones per player (Head, HumanoidRootPart, and one leg).
+-- If ANY of the three is onScreen the player counts as visible.
+-- This stops the case where a player's head dips behind a ledge but
+-- their torso is still exposed — they stay in the target list.
+local function IsVisible(char)
+    local checkBones = { "Head", "HumanoidRootPart", "LeftFoot", "RightFoot" }
+    for _, boneName in ipairs(checkBones) do
+        local bone = char:FindFirstChild(boneName)
+        if bone then
+            local _, onScreen = Camera:WorldToViewportPoint(bone.Position)
+            if onScreen then return true end
+        end
+    end
+    return false
+end
+
 -- ─── STANDARD AIMBOT ─────────────────────────────────────────────────────────
 local function GetClosestTarget()
     local vCenter  = Camera.ViewportSize / 2
@@ -449,18 +465,10 @@ RunService.RenderStepped:Connect(function()
 end)
 
 -- ─── ABSOLUTE AIM ENGINE ─────────────────────────────────────────────────────
---
--- KEY CHANGE vs previous version:
---
--- Target selection: WorldToViewportPoint onScreen=true gate is back.
--- Only players the camera can actually see (not behind a wall) enter the list.
--- RebuildTargetList still sorts by 3D distance among visible targets.
---
--- Lock strength: Camera.CFrame is SET directly (no Lerp) when AA_LockSmooth
--- is at 1.0 (default). This is effectively 0 delay — one RenderStepped frame
--- and the camera is already on the head. If dj wants slight motion instead of
--- a hard snap, they can drop the sub-input value (e.g. 90 = 0.9 lerp, still
--- extremely fast but visually has one frame of travel).
+-- Detection: IsVisible() — three-bone frustum check, no raycast.
+-- Camera lock: direct CFrame set at AA_LockSmooth >= 1.0 (default).
+-- The lock runs on RenderStepped BEFORE the game's camera scripts commit,
+-- so it wins every frame.
 
 local function RebuildTargetList()
     aaTargetList = {}
@@ -476,49 +484,38 @@ local function RebuildTargetList()
         local root = char:FindFirstChild("HumanoidRootPart")
 
         if hum and hum.Health > 0 and head and root then
-            -- *** VISIBLE-ONLY GATE ***
-            -- WorldToViewportPoint returns onScreen=true only when the point
-            -- is in front of the camera frustum — it does NOT raycast walls.
-            -- To also reject players behind geometry we cast a ray from the
-            -- camera to the head. If the first hit is NOT the target character
-            -- we skip them.
-            local _, onScreen = Camera:WorldToViewportPoint(head.Position)
-            if not onScreen then continue end
-
-            -- raycast wall check: camera → head
-            local origin    = Camera.CFrame.Position
-            local direction = (head.Position - origin)
-            local rayResult = workspace:Raycast(
-                origin,
-                direction,
-                RaycastParams.new() -- default params hit everything
-            )
-            -- if ray hit something that is NOT part of this character, skip
-            if rayResult and not char:IsAncestorOf(rayResult.Instance)
-                        and rayResult.Instance ~= head
-                        and rayResult.Instance ~= root then
-                continue
+            if IsVisible(char) then
+                local dist = (root.Position - hrp.Position).Magnitude
+                table.insert(aaTargetList, {
+                    player = plr,
+                    bone   = head,
+                    dist   = dist,
+                })
             end
-
-            local dist = (root.Position - hrp.Position).Magnitude
-            table.insert(aaTargetList, { player = plr, bone = head, dist = dist })
         end
     end
 
+    -- nearest first
     table.sort(aaTargetList, function(a, b) return a.dist < b.dist end)
-    aaTargetIndex = 1
+    -- don't reset index — if list shrinks clamp it below
+    if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
 end
 
 local function GetCurrentAATarget()
     if #aaTargetList == 0 then return nil end
     if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
     local entry = aaTargetList[aaTargetIndex]
-    local hum   = entry.player.Character
-        and entry.player.Character:FindFirstChildOfClass("Humanoid")
-    if not hum or hum.Health <= 0 then
-        aaTargetIndex = aaTargetIndex + 1
+    -- validate still alive and still visible
+    local char = entry.player.Character
+    if not char then
+        table.remove(aaTargetList, aaTargetIndex)
         if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
-        if #aaTargetList == 1 then return nil end -- only dead target was in list
+        return GetCurrentAATarget()
+    end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then
+        table.remove(aaTargetList, aaTargetIndex)
+        if aaTargetIndex > #aaTargetList then aaTargetIndex = 1 end
         return GetCurrentAATarget()
     end
     return entry.bone
@@ -535,43 +532,46 @@ local function StartAbsoluteAim()
     if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
 
     if State.AA_ShowESP then
-        BuildESP()
-        BuildHL()
-        State.ESP     = true
-        State.ESPGlow = true
+        BuildESP(); BuildHL()
+        State.ESP = true; State.ESPGlow = true
         if ToggleRegistry["ESP"]     then ToggleRegistry["ESP"].update()     end
         if ToggleRegistry["ESPGlow"] then ToggleRegistry["ESPGlow"].update() end
     end
 
     RebuildTargetList()
 
-    -- refresh visible target list every 1.5s (shorter interval because
-    -- targets move in and out of view frequently in FPS games)
+    -- continuous rebuild on a tight loop so new visible players enter fast
     task.spawn(function()
         while State.AbsoluteAim do
-            task.wait(1.5)
+            task.wait(0.75)
             if State.AbsoluteAim then RebuildTargetList() end
         end
     end)
 
-    -- RenderStepped: lock camera to visible target head
-    aaConn = RunService.RenderStepped:Connect(function()
-        if not State.AbsoluteAim then return end
-        local bone = GetCurrentAATarget()
-        if not bone then return end
+    -- RenderStepped: camera lock
+    -- Priority = Enum.RenderPriority.Camera + 1 so we run AFTER Roblox's
+    -- default camera scripts and overwrite their result before the frame draws.
+    aaConn = RunService:BindToRenderStep(
+        "AA_Lock",
+        Enum.RenderPriority.Camera.Value + 1,
+        function()
+            if not State.AbsoluteAim then return end
+            local bone = GetCurrentAATarget()
+            if not bone then return end
 
-        local goal = CFrame.new(Camera.CFrame.Position, bone.Position)
+            local camPos = Camera.CFrame.Position
+            local goal   = CFrame.new(camPos, bone.Position)
 
-        if State.AA_LockSmooth >= 1.0 then
-            -- hard snap — direct set, zero latency
-            Camera.CFrame = goal
-        else
-            Camera.CFrame = Camera.CFrame:Lerp(goal, State.AA_LockSmooth)
+            if State.AA_LockSmooth >= 1.0 then
+                Camera.CFrame = goal          -- hard instant snap
+            else
+                Camera.CFrame = Camera.CFrame:Lerp(goal, State.AA_LockSmooth)
+            end
         end
-    end)
+    )
 
     -- attack heartbeat
-    if State.AA_AutoAttack then
+    local function AttackLoop()
         aaAttackConn = RunService.Heartbeat:Connect(function()
             if not State.AbsoluteAim or not State.AA_AutoAttack then return end
             local now = tick()
@@ -587,17 +587,19 @@ local function StartAbsoluteAim()
             if State.AA_CycleTargets then AdvanceTarget() end
         end)
     end
+
+    if State.AA_AutoAttack then AttackLoop() end
 end
 
 local function StopAbsoluteAim()
-    if aaConn       then aaConn:Disconnect()      aaConn       = nil end
+    pcall(function() RunService:UnbindFromRenderStep("AA_Lock") end)
     if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
+    aaConn        = nil
     aaTargetList  = {}
     aaTargetIndex = 1
 end
 
 -- ─── FEATURE LAYOUT ──────────────────────────────────────────────────────────
-
 CreateSection("  AIMBOT")
 
 local fovInput = CreateInput("FOV radius (default 150)")
@@ -633,45 +635,41 @@ SubLbl.TextXAlignment    = Enum.TextXAlignment.Left
 SubLbl.Parent            = ContentFrame
 
 CreateSubToggle("Auto Attack (fires weapon automatically)", "AA_AutoAttack", function(on)
-    if State.AbsoluteAim then
-        if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
-        if on then
-            aaAttackConn = RunService.Heartbeat:Connect(function()
-                if not State.AbsoluteAim or not State.AA_AutoAttack then return end
-                local now = tick()
-                if now - aaLastAttack < State.AA_AttackDelay then return end
-                aaLastAttack = now
-                local vc = Camera.ViewportSize
-                pcall(function()
-                    VirtualUser:CaptureController()
-                    VirtualUser:Button1Down(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
-                    task.wait(0.05)
-                    VirtualUser:Button1Up(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
-                end)
-                if State.AA_CycleTargets then AdvanceTarget() end
+    if not State.AbsoluteAim then return end
+    if aaAttackConn then aaAttackConn:Disconnect() aaAttackConn = nil end
+    if on then
+        aaAttackConn = RunService.Heartbeat:Connect(function()
+            if not State.AbsoluteAim or not State.AA_AutoAttack then return end
+            local now = tick()
+            if now - aaLastAttack < State.AA_AttackDelay then return end
+            aaLastAttack = now
+            local vc = Camera.ViewportSize
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:Button1Down(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
+                task.wait(0.05)
+                VirtualUser:Button1Up(Vector2.new(vc.X / 2, vc.Y / 2), CFrame.new())
             end)
-        end
+            if State.AA_CycleTargets then AdvanceTarget() end
+        end)
     end
 end)
 
 CreateSubToggle("Cycle Targets (switch after each shot)", "AA_CycleTargets", function(_) end)
 CreateSubToggle("Force ESP on (see enemies clearly)",     "AA_ShowESP",      function(_) end)
 
-local delayInput = CreateSubInput("Attack delay in seconds (default 0.35)", "0.35")
+local delayInput = CreateSubInput("Attack delay seconds (default 0.35)", "0.35")
 delayInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(delayInput.Text)
     State.AA_AttackDelay = v and math.clamp(v, 0.05, 5.0) or 0.35
 end)
 
--- Lock smooth: 100 = instant hard snap (default), lower = smoother travel
--- at 90 it still locks in one frame on 60fps, just with a tiny visible arc
 local lockSmoothInput = CreateSubInput("Lock speed 1-100  (100 = instant snap)", "100")
 lockSmoothInput:GetPropertyChangedSignal("Text"):Connect(function()
     local v = tonumber(lockSmoothInput.Text)
     if v then
-        local clamped = math.clamp(v, 1, 100)
-        -- 100 triggers the direct-set path, anything below uses Lerp
-        State.AA_LockSmooth = clamped >= 100 and 1.0 or (clamped / 100)
+        local c = math.clamp(v, 1, 100)
+        State.AA_LockSmooth = c >= 100 and 1.0 or (c / 100)
     else
         State.AA_LockSmooth = 1.0
     end
@@ -729,17 +727,18 @@ ScanLbl.Parent                 = ScanBtn
 ScanBtn.MouseButton1Click:Connect(function()
     RebuildTargetList()
     if #aaTargetList == 0 then
-        Console.Text = "> no visible enemies\n> move until you see one\n> then scan again"
+        Console.Text = "> no visible enemies\n> face them then scan"
         return
     end
-    local lines = { string.format("> %d visible enemies:", #aaTargetList) }
-    for i = 1, math.min(3, #aaTargetList) do
+    local lines = { string.format("> %d visible:", #aaTargetList) }
+    for i = 1, math.min(4, #aaTargetList) do
         local e = aaTargetList[i]
-        table.insert(lines, string.format("> #%d %s  %.0f studs", i, e.player.Name, e.dist))
+        table.insert(lines, string.format("> #%d %s  %.0fst", i, e.player.Name, e.dist))
     end
     Console.Text = table.concat(lines, "\n")
 end)
 
+-- ─── BACK TO MENU ────────────────────────────────────────────────────────────
 local BackBtn2 = Instance.new("TextButton")
 BackBtn2.Name             = "BackToMenu"
 BackBtn2.Size             = UDim2.new(0, 255, 0, 46)
@@ -763,8 +762,7 @@ BackLbl2.Font                   = Enum.Font.GothamBold
 BackLbl2.Parent                 = BackBtn2
 BackBtn2.MouseButton1Click:Connect(function()
     StopAbsoluteAim()
-    ClearESP()
-    ClearHL()
+    ClearESP(); ClearHL()
     ScreenGui:Destroy()
     loadstring(game:HttpGet("https://raw.githubusercontent.com/jebnnna/roblox_cs/main/Menu.txt"))()
 end)
