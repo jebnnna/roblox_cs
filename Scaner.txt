@@ -137,17 +137,9 @@ local function GetHRP()
     return HRP
 end
 
-local function DistanceTo(inst)
-    local root = GetHRP(); if not root then return 0 end
-    local pos = GetInstPos(inst)
-    return pos and math.floor((root.Position - pos).Magnitude) or 0
-end
-
-local function ClearHL() if hlFolder then hlFolder:Destroy(); hlFolder = nil end end
-local function ClearRadarHL() if radarFolder then radarFolder:Destroy(); radarFolder = nil end end
-
 -- Get position from instance (used at search time for snapshot)
 -- Searches recursively so nested models (buildings, NPCs, pickups) resolve correctly.
+-- MUST be defined before DistanceTo so the reference resolves at compile time.
 local function GetInstPos(inst)
     if inst:IsA("BasePart") then return inst.Position
     elseif inst:IsA("Model") then
@@ -162,6 +154,15 @@ local function GetInstPos(inst)
     end
     return nil
 end
+
+local function DistanceTo(inst)
+    local root = GetHRP(); if not root then return 0 end
+    local pos = GetInstPos(inst)
+    return pos and math.floor((root.Position - pos).Magnitude) or 0
+end
+
+local function ClearHL() if hlFolder then hlFolder:Destroy(); hlFolder = nil end end
+local function ClearRadarHL() if radarFolder then radarFolder:Destroy(); radarFolder = nil end end
 
 -- Unified teleport: pre-warms streaming in background, moves player immediately.
 -- Returns true on success, false on failure (so callers can gate their status text).
